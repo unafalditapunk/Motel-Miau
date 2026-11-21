@@ -1,0 +1,11 @@
+[gd_resource type="Resource" script_class="IsometricGrid" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://Scripts/Core/IsometricGrid.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+tile_width = 64.0
+tile_height = 32.0
+height_pixels_per_unit = 32.0
+origin = Vector2i(0, 0)
+screen_offset = Vector2(320, 36)

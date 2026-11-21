@@ -1,0 +1,42 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="PackedScene" path="res://Scenes/World/Room.tscn" id="1"]
+[ext_resource type="Resource" path="res://Resources/IsometricGrid/TestGrid.tres" id="2"]
+[ext_resource type="Texture2D" path="res://Assets/Sprites/Tiles/floor_iso.png" id="3"]
+[ext_resource type="PackedScene" path="res://Scenes/Player/Player.tscn" id="4"]
+
+[node name="PlayerDirectionTest" type="Node2D"]
+
+[node name="Room" parent="." instance=ExtResource("1")]
+grid = ExtResource("2")
+size = Vector2i(10, 10)
+floor_texture = ExtResource("3")
+debug_coordinates = false
+
+[node name="PlayerDownRight" parent="." instance=ExtResource("4")]
+grid = ExtResource("2")
+room_size = Vector2i(10, 10)
+grid_position = Vector2i(2, 4)
+elevation = 0.0
+facing_direction = Vector2i(1, 0)
+
+[node name="PlayerUpLeft" parent="." instance=ExtResource("4")]
+grid = ExtResource("2")
+room_size = Vector2i(10, 10)
+grid_position = Vector2i(4, 4)
+elevation = 0.0
+facing_direction = Vector2i(-1, 0)
+
+[node name="PlayerDownLeft" parent="." instance=ExtResource("4")]
+grid = ExtResource("2")
+room_size = Vector2i(10, 10)
+grid_position = Vector2i(6, 4)
+elevation = 0.0
+facing_direction = Vector2i(0, 1)
+
+[node name="PlayerUpRight" parent="." instance=ExtResource("4")]
+grid = ExtResource("2")
+room_size = Vector2i(10, 10)
+grid_position = Vector2i(8, 4)
+elevation = 0.0
+facing_direction = Vector2i(0, -1)

@@ -1,0 +1,36 @@
+[gd_resource type="Resource" script_class="BuildingCatalog" load_steps=11 format=3]
+
+[ext_resource type="Script" path="res://Scripts/Objects/BuildingCatalog.gd" id="1"]
+[ext_resource type="Script" path="res://Scripts/Objects/CatalogCategory.gd" id="2"]
+[ext_resource type="Resource" path="res://Resources/BlockCatalog.tres" id="3"]
+[ext_resource type="Resource" path="res://Resources/FurnitureCatalog.tres" id="4"]
+[ext_resource type="Resource" path="res://Resources/TileCatalog.tres" id="5"]
+[ext_resource type="Resource" path="res://Resources/CarpetCatalog.tres" id="6"]
+
+[sub_resource type="Resource" id="Category_tiles"]
+script = ExtResource("2")
+category_id = &"tiles"
+display_name = "Tiles"
+catalog = ExtResource("5")
+
+[sub_resource type="Resource" id="Category_carpets"]
+script = ExtResource("2")
+category_id = &"carpets"
+display_name = "Carpets"
+catalog = ExtResource("6")
+
+[sub_resource type="Resource" id="Category_blocks"]
+script = ExtResource("2")
+category_id = &"blocks"
+display_name = "Blocks"
+catalog = ExtResource("3")
+
+[sub_resource type="Resource" id="Category_furniture"]
+script = ExtResource("2")
+category_id = &"furniture"
+display_name = "Furniture"
+catalog = ExtResource("4")
+
+[resource]
+script = ExtResource("1")
+categories = Array[CatalogCategory]([SubResource("Category_tiles"), SubResource("Category_carpets"), SubResource("Category_blocks"), SubResource("Category_furniture")])

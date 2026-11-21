@@ -1,0 +1,2 @@
+class_name TileDefinition
+extends PlaceableDefinition
