@@ -96,16 +96,164 @@ static func list_saves() -> Array[Dictionary]:
 	return saves
 
 # ------------------------------------------------------------------
+# RoomWorld room states (keyed by room coordinates, no player data)
+# ------------------------------------------------------------------
+
+static func room_state_name(room_coordinates: Vector2i, size: Vector2i) -> String:
+	return "room_%d_%d_%dx%d" % [room_coordinates.x, room_coordinates.y, size.x, size.y]
+
+static func room_state_path(room_coordinates: Vector2i, size: Vector2i) -> String:
+	return SAVE_DIR.path_join("%s.json" % room_state_name(room_coordinates, size))
+
+## Pre-dimension filenames shared saves across different room sizes; kept
+## only as a read fallback so existing saves are not orphaned.
+static func legacy_room_state_path(room_coordinates: Vector2i) -> String:
+	return SAVE_DIR.path_join("room_%d_%d.json" % [room_coordinates.x, room_coordinates.y])
+
+static func room_state_candidates(room_coordinates: Vector2i, size: Vector2i) -> Array[String]:
+	var paths: Array[String] = []
+	var current := room_state_path(room_coordinates, size)
+	if FileAccess.file_exists(current):
+		paths.append(current)
+	var legacy := legacy_room_state_path(room_coordinates)
+	if FileAccess.file_exists(legacy):
+		paths.append(legacy)
+	return paths
+
+static func player_state_path() -> String:
+	return SAVE_DIR.path_join("player_state.json")
+
+## Saves a single RoomWorld room's contents (blocks, furniture, carpets,
+## tiles). Player position is stored separately via save_player_state().
+static func save_room_world_room(room_world: RoomWorld, room: Room) -> Error:
+	if room_world == null or room == null or room.block_layer == null:
+		push_error("RoomSaveSystem.save_room_world_room requires a RoomWorld and a Room with BlockLayer.")
+		return ERR_INVALID_PARAMETER
+	if not _ensure_save_dir():
+		push_error("RoomSaveSystem could not create save dir '%s'." % SAVE_DIR)
+		return ERR_CANT_CREATE
+	var path := room_state_path(room.room_coordinates, room.size)
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		push_error("RoomSaveSystem could not open '%s' for writing: %s" % [path, error_string(FileAccess.get_open_error())])
+		return FileAccess.get_open_error()
+	var state_name := room_state_name(room.room_coordinates, room.size)
+	var spawn := Vector2i(room.size.x >> 1, room.size.y >> 1)
+	file.store_string(JSON.stringify(_collect_room_data(room, room.block_layer, null, state_name, state_name, spawn), "\t"))
+	file.close()
+	return OK
+
+## Loads a saved room state into a RoomWorld room. Returns false when no
+## save exists for the room's coordinates or the save is invalid.
+static func load_room_world_room(room_world: RoomWorld, room: Room) -> bool:
+	if room_world == null or room == null or room.block_layer == null:
+		push_error("RoomSaveSystem.load_room_world_room requires a RoomWorld and a Room with BlockLayer.")
+		return false
+	var candidates := room_state_candidates(room.room_coordinates, room.size)
+	if candidates.is_empty():
+		return false
+	var tile_layer := room.get_node_or_null(^"TileLayer") as TileLayer
+	var carpet_layer := room.get_node_or_null(^"CarpetLayer") as CarpetLayer
+	for path in candidates:
+		var data := _read_save_file(path)
+		if data.is_empty():
+			continue
+		var size := _read_size(data.get("size"))
+		if size == Vector2i.ZERO or size != room.size:
+			push_warning("RoomSaveSystem: save '%s' size %s does not match room size %s; skipped." % [path, size, room.size])
+			continue
+		return _apply_data(
+			room, room.block_layer, tile_layer, carpet_layer, null,
+			room_world.grid, room_world.block_catalog, room_world.furniture_catalog,
+			room_world.carpet_catalog, room_world.tile_catalog, data)
+	return false
+
+## Persists which room the player is in and where they stand, so the next
+## session can restore the exact position.
+static func save_player_state(room_coordinates: Vector2i, position: Vector2i, elevation: float) -> Error:
+	if not _ensure_save_dir():
+		push_error("RoomSaveSystem could not create save dir '%s'." % SAVE_DIR)
+		return ERR_CANT_CREATE
+	var path := player_state_path()
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		push_error("RoomSaveSystem could not open '%s' for writing: %s" % [path, error_string(FileAccess.get_open_error())])
+		return FileAccess.get_open_error()
+	file.store_string(JSON.stringify({
+		"version": VERSION,
+		"room_coordinates": [room_coordinates.x, room_coordinates.y],
+		"position": [position.x, position.y],
+		"elevation": elevation,
+	}, "\t"))
+	file.close()
+	return OK
+
+## Returns {"room_coordinates", "position", "elevation"} or an empty
+## Dictionary when no valid player state exists.
+static func load_player_state() -> Dictionary:
+	var result := {}
+	var path := player_state_path()
+	if not FileAccess.file_exists(path):
+		return result
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return result
+	var parsed: Variant = JSON.parse_string(file.get_as_text())
+	file.close()
+	if not (parsed is Dictionary):
+		return result
+	var data: Dictionary = parsed
+	if _as_int(data.get("version")) != VERSION:
+		return result
+	var coordinates = _read_vec2i(data.get("room_coordinates"))
+	var position = _read_vec2i(data.get("position"))
+	var elevation: Variant = data.get("elevation", 0.0)
+	if coordinates == null or position == null or not _is_finite_number(elevation):
+		return result
+	result["room_coordinates"] = coordinates
+	result["position"] = position
+	result["elevation"] = float(elevation)
+	return result
+
+static func _read_save_file(path: String) -> Dictionary:
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		push_error("RoomSaveSystem could not open '%s': %s" % [path, error_string(FileAccess.get_open_error())])
+		return {}
+	var text := file.get_as_text()
+	file.close()
+	var parsed: Variant = JSON.parse_string(text)
+	if not (parsed is Dictionary):
+		push_error("RoomSaveSystem: '%s' is not valid JSON." % path)
+		return {}
+	var data: Dictionary = parsed
+	var validation := validate_data(data)
+	if not validation["ok"]:
+		for error in validation["errors"]:
+			push_error("RoomSaveSystem: %s" % str(error))
+		return {}
+	return data
+
+# ------------------------------------------------------------------
 # Data collection
 # ------------------------------------------------------------------
 
 static func collect_room_data(world: World) -> Dictionary:
-	var room: Room = world.room
 	var room_def := world.room_definition
+	var spawn := Vector2i(1, 1)
+	var room_id := ""
+	var display_name := ""
+	if room_def != null:
+		room_id = str(room_def.room_id)
+		display_name = room_def.display_name
+		spawn = room_def.spawn_position
+	return _collect_room_data(world.room, world.block_layer, world.player, room_id, display_name, spawn)
+
+static func _collect_room_data(room: Room, block_layer: BlockLayer, player: Player, room_id: String, display_name: String, spawn: Vector2i) -> Dictionary:
 	var block_placements: Array = []
 	var furniture_placements: Array = []
 	var carpet_placements: Array = []
-	for block in world.block_layer.blocks:
+	for block in block_layer.blocks:
 		if not is_instance_valid(block):
 			continue
 		var entry := _serialize_block(block)
@@ -120,18 +268,14 @@ static func collect_room_data(world: World) -> Dictionary:
 		if cell.carpet != null and cell.carpet_anchor == coordinates:
 			carpet_placements.append(_serialize_carpet(cell))
 
-	var spawn := Vector2i(1, 1)
-	if room_def != null:
-		spawn = room_def.spawn_position
-
 	return {
 		"version": VERSION,
-		"room_id": str(room_def.room_id) if room_def != null else "",
-		"display_name": room_def.display_name if room_def != null else "",
+		"room_id": room_id,
+		"display_name": display_name,
 		"size": [room.size.x, room.size.y],
 		"grid_resource": room.grid.resource_path if room.grid != null else "",
 		"spawn_position": [spawn.x, spawn.y],
-		"player": _serialize_player(world.player),
+		"player": _serialize_player(player),
 		"block_placements": block_placements,
 		"furniture_placements": furniture_placements,
 		"carpet_placements": carpet_placements,
@@ -201,13 +345,35 @@ static func resolve_save_path(world: World, room_name := "") -> String:
 	return saves[0]["path"] if not saves.is_empty() else ""
 
 static func apply_data(world: World, data: Dictionary) -> bool:
-	var room: Room = world.room
-	var block_layer: BlockLayer = world.block_layer
+	var definition_grid: IsometricGrid = null
+	if world.room_definition != null:
+		definition_grid = world.room_definition.grid
+	return _apply_data(
+		world.room, world.block_layer, world.tile_layer, world.carpet_layer, world.player,
+		definition_grid, world.block_catalog, world.furniture_catalog, world.carpet_catalog, world.tile_catalog,
+		data)
+
+static func _apply_data(
+	room: Room,
+	block_layer: BlockLayer,
+	tile_layer: TileLayer,
+	carpet_layer: CarpetLayer,
+	player: Player,
+	definition_grid: IsometricGrid,
+	block_catalog: BlockCatalog,
+	furniture_catalog: FurnitureCatalog,
+	carpet_catalog: CarpetCatalog,
+	tile_catalog: TileCatalog,
+	data: Dictionary
+) -> bool:
+	if room == null or block_layer == null:
+		push_error("RoomSaveSystem.apply_data requires a Room and BlockLayer.")
+		return false
 	var size := _read_size(data.get("size"))
 	if size == Vector2i.ZERO:
 		push_error("RoomSaveSystem: cannot apply data with invalid size.")
 		return false
-	var grid := _resolve_grid(world, str(data.get("grid_resource", "")))
+	var grid := _resolve_grid(room, definition_grid, str(data.get("grid_resource", "")))
 	if grid == null:
 		push_error("RoomSaveSystem: no IsometricGrid available for load.")
 		return false
@@ -216,13 +382,13 @@ static func apply_data(world: World, data: Dictionary) -> bool:
 	room.set_size(size)
 	block_layer.grid = grid
 	block_layer.room_size = size
-	if world.tile_layer != null:
-		world.tile_layer.grid = grid
-	if world.carpet_layer != null:
-		world.carpet_layer.grid = grid
-	if world.player != null:
-		world.player.grid = grid
-		world.player.room_size = size
+	if tile_layer != null:
+		tile_layer.grid = grid
+	if carpet_layer != null:
+		carpet_layer.grid = grid
+	if player != null:
+		player.grid = grid
+		player.room_size = size
 	block_layer.clear_blocks()
 
 	# Sort by elevation ascending so elevated objects find their support.
@@ -247,14 +413,14 @@ static func apply_data(world: World, data: Dictionary) -> bool:
 		var flip := bool(entry.get("flip", false))
 		var placed: Block = null
 		if item["kind"] == "block":
-			var def: BlockDefinition = world.block_catalog.get_definition(object_id) if world.block_catalog != null else null
+			var def: BlockDefinition = block_catalog.get_definition(object_id) if block_catalog != null else null
 			if def == null:
 				push_warning("RoomSaveSystem: missing block definition '%s'; skipped." % object_id)
 				skipped += 1
 				continue
 			placed = block_layer.place_block(def, position, elevation)
 		else:
-			var def: FurnitureDefinition = world.furniture_catalog.get_definition(object_id) if world.furniture_catalog != null else null
+			var def: FurnitureDefinition = furniture_catalog.get_definition(object_id) if furniture_catalog != null else null
 			if def == null:
 				push_warning("RoomSaveSystem: missing furniture definition '%s'; skipped." % object_id)
 				skipped += 1
@@ -279,7 +445,7 @@ static func apply_data(world: World, data: Dictionary) -> bool:
 			var carpet_entry: Dictionary = entry
 			var object_id := StringName(str(carpet_entry.get("id", "")))
 			var position = _read_vec2i(carpet_entry.get("position"))
-			var definition: CarpetDefinition = world.carpet_catalog.get_definition(object_id) if world.carpet_catalog != null else null
+			var definition: CarpetDefinition = carpet_catalog.get_definition(object_id) if carpet_catalog != null else null
 			if definition == null or position == null:
 				push_warning("RoomSaveSystem: missing carpet definition '%s'; skipped." % object_id)
 				skipped += 1
@@ -293,15 +459,15 @@ static func apply_data(world: World, data: Dictionary) -> bool:
 	if skipped > 0:
 		push_warning("RoomSaveSystem: %d placement(s) skipped during load." % skipped)
 
-	_apply_tiles(world, room, data)
-	_place_player(world.player, data, size)
+	_apply_tiles(tile_catalog, room, data)
+	_place_player(player, data, size)
 	return true
 
-static func _apply_tiles(world: World, room: Room, data: Dictionary) -> void:
+static func _apply_tiles(tile_catalog: TileCatalog, room: Room, data: Dictionary) -> void:
 	var entries: Variant = data.get("tiles", [])
 	if not (entries is Array) or (entries as Array).is_empty():
 		return
-	var catalog := world.tile_catalog
+	var catalog := tile_catalog
 	for entry in entries:
 		if not (entry is Dictionary):
 			continue
@@ -336,16 +502,16 @@ static func _place_player(player: Player, data: Dictionary, size: Vector2i) -> v
 		spawn = Vector2i(1, 1)
 	player.place_at(spawn, player.stand_elevation_at(spawn))
 
-static func _resolve_grid(world: World, grid_path: String) -> IsometricGrid:
+static func _resolve_grid(room: Room, definition_grid: IsometricGrid, grid_path: String) -> IsometricGrid:
 	if not grid_path.is_empty() and grid_path.begins_with("res://") and ResourceLoader.exists(grid_path):
 		var resource := ResourceLoader.load(grid_path)
 		if resource is IsometricGrid:
 			return resource
 		push_warning("RoomSaveSystem: saved grid '%s' is not an IsometricGrid; keeping current grid." % grid_path)
-	if world.room != null and world.room.grid != null:
-		return world.room.grid
-	if world.room_definition != null and world.room_definition.grid != null:
-		return world.room_definition.grid
+	if room != null and room.grid != null:
+		return room.grid
+	if definition_grid != null:
+		return definition_grid
 	push_error("RoomSaveSystem: no IsometricGrid available for load.")
 	return null
 

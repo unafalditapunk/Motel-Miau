@@ -30,7 +30,8 @@ func _process(_delta: float) -> void:
 		visible = false
 		return
 	var world_mouse := get_viewport().get_canvas_transform().affine_inverse() * get_viewport().get_mouse_position()
-	var cell := room.grid.screen_to_grid(world_mouse)
+	var world_cell := room.grid.screen_to_grid(world_mouse)
+	var cell := world_cell - room.cell_origin
 	if not room.grid.is_valid(cell, room.size):
 		visible = false
 		return
@@ -52,7 +53,7 @@ func _process(_delta: float) -> void:
 	elif definition is BlockDefinition:
 		valid = layer.can_place(definition, cell, elevation)
 	var player := get_tree().get_first_node_in_group(&"player")
-	if player != null and player.grid_position == cell:
+	if player != null and player.room != null and player.room.world_cell_coordinates(player.grid_position) == world_cell:
 		valid = false
 
 	visible = true
@@ -62,7 +63,7 @@ func _process(_delta: float) -> void:
 	_sprite.rotation_degrees = float(rotation_deg)
 	_sprite.flip_h = _controller.flipped
 	_sprite.modulate = VALID_COLOR if valid else INVALID_COLOR
-	position = layer._footprint_screen_position(footprint, cell, elevation)
+	position = layer._footprint_screen_position(footprint, world_cell, elevation)
 
 func _show_carpet(definition: CarpetDefinition, cell: Vector2i, room: Room, layer: BlockLayer) -> void:
 	visible = true
@@ -84,7 +85,7 @@ func _show_carpet(definition: CarpetDefinition, cell: Vector2i, room: Room, laye
 	else:
 		_sprite.scale = Vector2.ONE
 	var elevation := layer.get_top_z_at(cell)
-	var center := Vector2(cell) + Vector2(footprint - Vector2i.ONE) * 0.5
+	var center := Vector2(cell + room.cell_origin) + Vector2(footprint - Vector2i.ONE) * 0.5
 	position = room.grid.grid_to_screen_position(center, elevation)
 	_sprite.modulate = VALID_COLOR if room.can_place_carpet(definition, cell, rotation_deg) else INVALID_COLOR
 
@@ -104,4 +105,4 @@ func _show_tile(definition: TileDefinition, cell: Vector2i, room: Room, layer: B
 	else:
 		_sprite.scale = Vector2.ONE
 	_sprite.modulate = VALID_COLOR
-	position = room.grid.grid_to_screen_position(Vector2(cell), layer.get_top_z_at(cell))
+	position = room.grid.grid_to_screen_position(Vector2(cell + room.cell_origin), layer.get_top_z_at(cell))

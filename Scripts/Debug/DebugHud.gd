@@ -77,11 +77,25 @@ func _build_text() -> String:
 	var world_pos := player.global_position
 	var cell_screen := Vector2.ZERO
 	if grid != null:
-		cell_screen = grid.grid_to_screen(cell, player.elevation)
+		var anchor_cell := cell
+		if player.room != null:
+			anchor_cell = player.room.world_cell_coordinates(cell)
+		cell_screen = grid.grid_to_screen(anchor_cell, player.elevation)
 	lines.append("Grid cell:   (%d, %d)" % [cell.x, cell.y])
+	if player.room != null:
+		lines.append("Room:        (%d, %d)" % [player.room.room_coordinates.x, player.room.room_coordinates.y])
+	else:
+		lines.append("Room:        <none>")
 	lines.append("World pos:   (%.2f, %.2f)" % [world_pos.x, world_pos.y])
 	lines.append("Cell anchor: (%.2f, %.2f)" % [cell_screen.x, cell_screen.y])
 	lines.append("Facing:      %s   Buffered: %s" % [str(player.facing_direction), str(player._buffered_direction)])
+	var next := player.next_move_target()
+	var step := next - cell
+	var transition := player.evaluate_transition(step)
+	if transition.get("attempted", false):
+		var dest: Vector2i = transition.get("room_coordinates", Vector2i.ZERO)
+		var status: String = "ok -> local %s" % str(transition.get("local_cell")) if transition.get("valid", false) else "blocked: %s" % str(transition.get("reason"))
+		lines.append("Transition %s -> room (%d, %d): %s" % [str(step), dest.x, dest.y, status])
 	var state := "Idle"
 	if player._is_moving:
 		var t := clampf(player._move_elapsed / maxf(player.move_duration, 0.0001), 0.0, 1.0)
@@ -93,7 +107,10 @@ func _build_text() -> String:
 	if camera != null:
 		lines.append("Camera:      zoom %.2f  pos (%.1f, %.1f)" % [camera.zoom.x, camera.global_position.x, camera.global_position.y])
 		if grid != null:
-			var mouse_cell := grid.screen_to_grid(camera.get_world_mouse_position())
+			var mouse_world := grid.screen_to_grid(camera.get_world_mouse_position())
+			var mouse_cell := mouse_world
+			if player.room != null:
+				mouse_cell = player.room.local_cell_coordinates(mouse_world)
 			lines.append("Mouse cell:  (%d, %d)" % [mouse_cell.x, mouse_cell.y])
 	lines.append("FPS:         %d" % Engine.get_frames_per_second())
 	return "\n".join(lines)

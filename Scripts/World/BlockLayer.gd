@@ -5,6 +5,9 @@ const EPSILON := 0.001
 
 @export var grid: IsometricGrid
 @export var room_size := Vector2i(10, 10)
+var room: Room
+@export var cell_origin := Vector2i.ZERO
+@export var compact_depth := false
 @export var block_scene: PackedScene
 @export var block_catalog: BlockCatalog
 @export var block_placements: Array[Resource] = []
@@ -26,6 +29,11 @@ func _ready() -> void:
 func rebuild() -> void:
 	clear_blocks()
 	_load_placements()
+
+func refresh_depths() -> void:
+	for block in blocks:
+		if is_instance_valid(block):
+			block.z_index = depth_for_block(block)
 
 func clear_blocks() -> void:
 	for block in blocks:
@@ -126,6 +134,8 @@ func place_block(definition: BlockDefinition, grid_position: Vector2i, elevation
 		return null
 
 	add_child(block)
+	if room != null:
+		room.apply_deemphasis_to(block)
 	block.setup(definition, grid_position, elevation, grid)
 	block.position = _footprint_screen_position(definition.footprint, grid_position, elevation)
 	block.z_index = depth_for_block(block)
@@ -149,6 +159,8 @@ func place_furniture(definition: FurnitureDefinition, grid_position: Vector2i, e
 		return null
 
 	add_child(furniture)
+	if room != null:
+		room.apply_deemphasis_to(furniture)
 	furniture.setup_furniture(definition, grid_position, elevation, rotation_deg, grid)
 	furniture.position = _footprint_screen_position(furniture.footprint, grid_position, elevation)
 	furniture.z_index = depth_for_block(furniture)
@@ -185,7 +197,10 @@ func get_surface_elevation(cell: Vector2i) -> float:
 	return get_top_z_at(cell)
 
 func depth_for_cell(cell: Vector2i, elevation: float = 0.0) -> int:
-	return (cell.x + cell.y) * 128 + cell.y * 16 + int(round(elevation))
+	var world_cell := cell + cell_origin
+	if compact_depth:
+		return (world_cell.x + world_cell.y) * 48 + world_cell.y * 6 + int(round(elevation))
+	return (world_cell.x + world_cell.y) * 128 + world_cell.y * 16 + int(round(elevation))
 
 func depth_for_block(block: Block) -> int:
 	if block == null:

@@ -22,6 +22,7 @@ var carpet_layer: CarpetLayer
 var block_layer: BlockLayer
 var entity_layer: Node2D
 var player: Player
+var room_world: RoomWorld
 
 @onready var placement_controller: BlockPlacementController = $BlockPlacementController
 @onready var world_camera: WorldCamera = $WorldCamera
@@ -63,6 +64,9 @@ func _save_room_name() -> String:
 	return "room"
 
 func _autosave() -> void:
+	if room_world != null:
+		room_world.save_all_rooms()
+		return
 	if room == null or block_layer == null or not is_instance_valid(room) or not is_instance_valid(block_layer):
 		return
 	var room_name := _save_room_name()
@@ -92,6 +96,9 @@ func _on_save_requested() -> void:
 	save_room()
 
 func save_room() -> Error:
+	if room_world != null:
+		room_world.save_all_rooms()
+		return OK
 	var room_name := _save_room_name()
 	var error := RoomSaveSystem.save_room(self, room_name)
 	if error == OK:
@@ -101,6 +108,9 @@ func save_room() -> Error:
 	return error
 
 func _on_load_requested() -> void:
+	if room_world != null:
+		room_world.load_all_rooms()
+		return
 	if RoomSaveSystem.load_room(self):
 		print("Room loaded successfully.")
 	else:
@@ -136,14 +146,14 @@ func _build_tile_layer(grid: IsometricGrid) -> void:
 	tile_layer.name = "TileLayer"
 	tile_layer.grid = grid
 	tile_layer.room = room
-	add_child(tile_layer)
+	room.add_child(tile_layer)
 
 func _build_carpet_layer(grid: IsometricGrid) -> void:
 	carpet_layer = CarpetLayer.new()
 	carpet_layer.name = "CarpetLayer"
 	carpet_layer.grid = grid
 	carpet_layer.room = room
-	add_child(carpet_layer)
+	room.add_child(carpet_layer)
 
 func _load_room_carpets() -> void:
 	if room_definition == null or room == null:
@@ -168,7 +178,7 @@ func _build_block_layer(grid: IsometricGrid) -> void:
 	block_layer.block_catalog = block_catalog
 	block_layer.furniture_catalog = furniture_catalog
 	block_layer.furniture_placements = room_definition.furniture_placements
-	add_child(block_layer)
+	room.add_child(block_layer)
 	if room != null:
 		room.block_layer = block_layer
 
@@ -188,6 +198,7 @@ func _spawn_player(grid: IsometricGrid) -> void:
 	player = spawned
 	player.grid = grid
 	player.block_layer = block_layer
+	player.room = room
 	player.room_size = room_definition.size
 	player.grid_position = room_definition.spawn_position
 	player.elevation = 0.0

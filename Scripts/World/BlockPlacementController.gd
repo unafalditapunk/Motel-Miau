@@ -33,6 +33,7 @@ var room: Room
 var selected_definition: PlaceableDefinition
 var rotation_degrees := 0
 var flipped := false
+var _player: Player
 
 func _ready() -> void:
 	add_to_group(&"block_placement_controller")
@@ -40,6 +41,23 @@ func _ready() -> void:
 		block_layer = get_node_or_null(block_layer_path) as BlockLayer
 	if not room_path.is_empty():
 		room = get_node_or_null(room_path) as Room
+
+func _process(_delta: float) -> void:
+	var tree := get_tree()
+	if tree == null:
+		return
+	if _player == null or not is_instance_valid(_player):
+		_player = tree.get_first_node_in_group(&"player") as Player
+	if _player == null:
+		return
+	var target_room := _player.room
+	if target_room == null or target_room == room:
+		return
+	_bind_room(target_room)
+
+func _bind_room(new_room: Room) -> void:
+	room = new_room
+	block_layer = new_room.block_layer if new_room != null else null
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey:
@@ -76,7 +94,7 @@ func try_place_at_mouse() -> bool:
 	if block_layer == null or room == null or room.grid == null:
 		return false
 	var world_position := get_viewport().get_canvas_transform().affine_inverse() * get_viewport().get_mouse_position()
-	var coordinates := room.grid.screen_to_grid(world_position)
+	var coordinates := room.grid.screen_to_grid(world_position) - room.cell_origin
 	if not room.grid.is_valid(coordinates, room.size):
 		return false
 	return place_at(coordinates)
@@ -118,7 +136,7 @@ func try_remove_at_mouse() -> bool:
 	if block_layer == null or room == null or room.grid == null:
 		return false
 	var world_position := get_viewport().get_canvas_transform().affine_inverse() * get_viewport().get_mouse_position()
-	var coordinates := room.grid.screen_to_grid(world_position)
+	var coordinates := room.grid.screen_to_grid(world_position) - room.cell_origin
 	if not room.grid.is_valid(coordinates, room.size):
 		return false
 	return remove_at(coordinates)
@@ -206,7 +224,11 @@ func _apply_flip(block: Block) -> void:
 		sprite.flip_h = true
 
 func _is_player_cell(coordinates: Vector2i) -> bool:
-	var player := get_tree().get_first_node_in_group(&"player")
+	var player := get_tree().get_first_node_in_group(&"player") as Player
 	if player == null:
 		return false
+	if room != null:
+		coordinates += room.cell_origin
+	if player.room != null:
+		return player.room.world_cell_coordinates(player.grid_position) == coordinates
 	return player.grid_position == coordinates

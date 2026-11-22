@@ -3,6 +3,8 @@ extends Node2D
 
 var grid: IsometricGrid
 var room: Room
+var cell_origin := Vector2i.ZERO
+var compact_depth := false
 
 var _tiles: Dictionary = {}
 var _resync_queued := false
@@ -55,10 +57,16 @@ func _update_tile_sprite(coordinates: Vector2i, cell: RoomCell) -> void:
 		else:
 			sprite.scale = Vector2.ONE
 	sprite.position = grid.grid_to_screen_position(Vector2(coordinates), cell.tile_elevation)
+	if room != null:
+		room.apply_deemphasis_to(sprite)
 	# Floor tiles stay below blocks; elevated tiles use surface depth so they
 	# render in front of the blocks supporting them.
 	var depth := _depth_for_cell(coordinates, cell.tile_elevation)
-	sprite.z_index = depth - 145 if cell.tile_elevation <= 0.001 else depth
+	var depth_offset := -54 if compact_depth else -145
+	sprite.z_index = depth + depth_offset if cell.tile_elevation <= 0.001 else depth
 
 func _depth_for_cell(cell: Vector2i, elevation: float) -> int:
-	return (cell.x + cell.y) * 128 + cell.y * 16 + int(round(elevation))
+	var world_cell := cell + cell_origin
+	if compact_depth:
+		return (world_cell.x + world_cell.y) * 48 + world_cell.y * 6 + int(round(elevation))
+	return (world_cell.x + world_cell.y) * 128 + world_cell.y * 16 + int(round(elevation))

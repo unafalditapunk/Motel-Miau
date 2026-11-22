@@ -10,11 +10,16 @@ signal cells_changed
 @export var floor_texture: Texture2D
 @export var default_tile: TileDefinition
 @export var debug_coordinates := false
+@export var room_coordinates := Vector2i.ZERO
+@export var cell_origin := Vector2i.ZERO
 
 var cells := {}
 var hovered_cell: Vector2i = Vector2i(-1, -1)
 var hovered_elevation := 0.0
 var block_layer: BlockLayer
+var deemphasis_material: Material = null
+var is_sliding := false
+var _deemphasis_nodes: Array[CanvasItem] = []
 
 const HOVER_EPSILON := 0.001
 const HOVER_TOLERANCE := 0.08
@@ -174,6 +179,33 @@ func cell_to_screen(coordinates: Vector2i) -> Vector2:
 		return Vector2.ZERO
 	return grid.grid_to_screen(coordinates)
 
+func world_cell_coordinates(local_coordinates: Vector2i) -> Vector2i:
+	return cell_origin + local_coordinates
+
+func local_cell_coordinates(world_coordinates: Vector2i) -> Vector2i:
+	return world_coordinates - cell_origin
+
+func cell_to_world(coordinates: Vector2i, elevation := 0.0) -> Vector2:
+	if grid == null:
+		return Vector2.ZERO
+	var local_screen := grid.grid_to_screen(coordinates, elevation)
+	if is_inside_tree():
+		return to_global(local_screen)
+	return position + local_screen
+
+func world_to_cell(world_position: Vector2) -> RoomCell:
+	return get_cell(world_to_cell_coordinates(world_position))
+
+func world_to_cell_coordinates(world_position: Vector2) -> Vector2i:
+	if grid == null:
+		return Vector2i(-1, -1)
+	var local_position := world_position
+	if is_inside_tree():
+		local_position = to_local(world_position)
+	else:
+		local_position = world_position - position
+	return grid.screen_to_grid(local_position)
+
 func screen_to_cell(screen_position: Vector2) -> RoomCell:
 	if grid == null:
 		return null
@@ -185,7 +217,7 @@ func screen_to_cell_coordinates(screen_position: Vector2) -> Vector2i:
 	return grid.screen_to_grid(screen_position)
 
 func get_cell_under_mouse() -> RoomCell:
-	return screen_to_cell(get_global_mouse_position())
+	return world_to_cell(get_global_mouse_position())
 
 func set_hovered_cell(coordinates: Vector2i, elevation := 0.0) -> void:
 	if coordinates == hovered_cell and is_equal_approx(elevation, hovered_elevation):
@@ -198,7 +230,15 @@ func set_hovered_cell(coordinates: Vector2i, elevation := 0.0) -> void:
 func _process(_delta: float) -> void:
 	if grid == null:
 		return
-	var pick := _pick_hovered_cell(get_global_mouse_position())
+	if not is_visible_in_tree() or is_sliding:
+		if hovered_cell != Vector2i(-1, -1):
+			set_hovered_cell(Vector2i(-1, -1), 0.0)
+		return
+	var local_mouse := to_local(get_global_mouse_position())
+	if not cells.has(grid.screen_to_grid(local_mouse)):
+		set_hovered_cell(Vector2i(-1, -1), 0.0)
+		return
+	var pick := _pick_hovered_cell(local_mouse)
 	set_hovered_cell(pick["cell"], pick["elevation"])
 
 func _pick_hovered_cell(mouse_position: Vector2) -> Dictionary:
@@ -260,6 +300,42 @@ func get_neighbor_cells(coordinates: Vector2i) -> Array[RoomCell]:
 		if cell != null:
 			neighbors.append(cell)
 	return neighbors
+
+func set_deemphasis(new_material: Material) -> void:
+	clear_deemphasis()
+	deemphasis_material = new_material
+	if new_material == null:
+		return
+	var items: Array[CanvasItem] = []
+	_gather_canvas_items(self, items)
+	_apply_material_to_items(items, new_material)
+
+func clear_deemphasis() -> void:
+	for item in _deemphasis_nodes:
+		if is_instance_valid(item):
+			item.material = null
+	_deemphasis_nodes.clear()
+	deemphasis_material = null
+
+func apply_deemphasis_to(node: Node) -> void:
+	if deemphasis_material == null or node == null:
+		return
+	var items: Array[CanvasItem] = []
+	_gather_canvas_items(node, items)
+	_apply_material_to_items(items, deemphasis_material)
+
+func _gather_canvas_items(node: Node, items: Array[CanvasItem]) -> void:
+	if node is CanvasItem:
+		items.append(node as CanvasItem)
+	for child in node.get_children():
+		_gather_canvas_items(child, items)
+
+func _apply_material_to_items(items: Array[CanvasItem], new_material: Material) -> void:
+	for item in items:
+		if _deemphasis_nodes.has(item):
+			continue
+		item.material = new_material
+		_deemphasis_nodes.append(item)
 
 func _notify_changed() -> void:
 	cells_changed.emit()

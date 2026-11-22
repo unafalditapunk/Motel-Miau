@@ -3,6 +3,7 @@ extends CharacterBody2D
 
 @export var grid: IsometricGrid
 @export var block_layer: BlockLayer
+@export var room: Room
 @export var room_size := Vector2i(10, 10)
 @export var grid_position := Vector2i.ZERO
 @export var elevation := 0.0
@@ -14,7 +15,8 @@ extends CharacterBody2D
 @export var sprite_down_left: Texture2D
 @export var sprite_up_right: Texture2D
 @export var facing_direction := Vector2i(1, 0)
-@export var move_duration := 0.18
+@export var move_duration := 0.24
+@export var hold_repeat_delay := 0.22
 @export var buffer_movement_input := true
 @export var sprite_bottom_offset := 0.0
 
@@ -25,6 +27,7 @@ var _move_to := Vector2.ZERO
 var _move_from_depth := 0
 var _move_to_depth := 0
 var _buffered_direction := Vector2i.ZERO
+var _held_moves: Dictionary = {}
 
 @onready var visual: AnimatedSprite2D = $Visual
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
@@ -126,8 +129,90 @@ func request_move(direction: Vector2i) -> void:
 	_buffered_direction = Vector2i.ZERO
 	_start_move(direction)
 
+func _inside_room_bounds(cell: Vector2i) -> bool:
+	return cell.x >= 0 and cell.y >= 0 and cell.x < room_size.x and cell.y < room_size.y
+
+func _room_world() -> RoomWorld:
+	return get_tree().get_first_node_in_group(&"room_worlds") as RoomWorld
+
+func _room_world_cell(local_cell: Vector2i) -> Vector2i:
+	if room != null:
+		return room.world_cell_coordinates(local_cell)
+	return local_cell
+
+func evaluate_transition(direction: Vector2i) -> Dictionary:
+	var result := {
+		"attempted": false,
+		"valid": false,
+		"reason": &"not a cardinal step",
+		"room_coordinates": Vector2i.ZERO,
+		"local_cell": Vector2i.ZERO,
+		"surface_elevation": 0.0,
+	}
+	if direction == Vector2i.ZERO or room == null or room.grid == null:
+		result["reason"] = &"no room context"
+		return result
+	if not _is_cardinal_direction(direction):
+		return result
+	result["attempted"] = true
+	var room_world := _room_world()
+	if room_world == null:
+		result["reason"] = &"no room world"
+		return result
+	var world_cell := _room_world_cell(grid_position) + direction
+	var dest_room := room_world.get_room_at_world_cell(world_cell) as Room
+	if dest_room == null or dest_room == room:
+		result["reason"] = &"no room beyond boundary"
+		return result
+	room_world.ensure_room_loaded(dest_room)
+	var dest_local := world_cell - dest_room.cell_origin
+	if dest_local.x < 0 or dest_local.y < 0 or dest_local.x >= dest_room.size.x or dest_local.y >= dest_room.size.y:
+		result["reason"] = &"outside destination room"
+		return result
+	var surface := 0.0
+	var dest_layer := dest_room.block_layer
+	if dest_layer != null:
+		surface = dest_layer.get_surface_elevation(dest_local)
+	result["surface_elevation"] = surface
+	result["room_coordinates"] = dest_room.room_coordinates
+	result["local_cell"] = dest_local
+	if absf(surface - elevation) > max_step_height + 0.001:
+		result["reason"] = &"step too high"
+		return result
+	if dest_layer != null and not (dest_layer.can_actor_stand(dest_local, surface, height_units) and dest_layer.is_standable_surface(dest_local, surface)):
+		result["reason"] = &"destination blocked"
+		return result
+	result["valid"] = true
+	return result
+
+func _start_room_transition(direction: Vector2i) -> bool:
+	var info := evaluate_transition(direction)
+	if not bool(info.get("valid", false)):
+		return false
+	var room_world := _room_world()
+	var world_cell := _room_world_cell(grid_position) + direction
+	var dest_room := room_world.get_room_at_world_cell(world_cell) as Room
+	if dest_room == null:
+		return false
+	_set_facing(direction)
+	var previous_room := room
+	var from_screen := position
+	var from_depth := _current_depth()
+	room = dest_room
+	block_layer = dest_room.block_layer
+	room_size = dest_room.size
+	grid_position = info["local_cell"]
+	elevation = float(info["surface_elevation"])
+	room_world.set_primary_room(dest_room.room_coordinates)
+	room_world.save_room_state(previous_room)
+	var to_screen := _screen_position_for_cell(grid_position, elevation)
+	var to_depth := _current_depth()
+	return _play_move(from_screen, from_depth, to_screen, to_depth)
+
 func _start_move(direction: Vector2i) -> bool:
 	var target := grid_position + direction
+	if not _inside_room_bounds(target):
+		return _start_room_transition(direction)
 	if not can_move_to(target):
 		return false
 	_set_facing(direction)
@@ -140,7 +225,9 @@ func _start_move(direction: Vector2i) -> bool:
 	grid_position = target
 	elevation = target_elevation
 	var to_depth := _current_depth()
+	return _play_move(from_screen, from_depth, to_screen, to_depth)
 
+func _play_move(from_screen: Vector2, from_depth: int, to_screen: Vector2, to_depth: int) -> bool:
 	if move_duration <= 0.0 or grid == null:
 		position = to_screen
 		z_index = to_depth
@@ -157,6 +244,7 @@ func _start_move(direction: Vector2i) -> bool:
 	return true
 
 func _process(delta: float) -> void:
+	_update_held_movement()
 	if not _is_moving:
 		return
 	_move_elapsed += delta
@@ -182,11 +270,31 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	if not (event is InputEventKey):
 		return
 	var key_event := event as InputEventKey
-	if not key_event.pressed or key_event.echo:
-		return
 	var direction := _direction_from_key(key_event.physical_keycode)
-	if direction != Vector2i.ZERO:
+	if direction == Vector2i.ZERO:
+		return
+	if key_event.pressed:
+		if key_event.echo:
+			return
 		request_move(direction)
+		_held_moves.erase(key_event.physical_keycode)
+		_held_moves[key_event.physical_keycode] = Time.get_ticks_msec()
+	else:
+		_held_moves.erase(key_event.physical_keycode)
+
+func _update_held_movement() -> void:
+	if _held_moves.is_empty():
+		return
+	var now := Time.get_ticks_msec()
+	var direction := Vector2i.ZERO
+	for keycode in _held_moves.keys():
+		if not Input.is_physical_key_pressed(keycode):
+			_held_moves.erase(keycode)
+		elif now - int(_held_moves[keycode]) >= int(hold_repeat_delay * 1000.0):
+			direction = _direction_from_key(keycode)
+	if direction == Vector2i.ZERO:
+		return
+	request_move(direction)
 
 func _direction_from_key(keycode: Key) -> Vector2i:
 	match keycode:
@@ -302,7 +410,8 @@ func _base_sprite_height() -> float:
 func _screen_position_for_cell(cell: Vector2i, cell_elevation: float) -> Vector2:
 	if grid == null:
 		return position
-	return grid.grid_to_screen_position(Vector2(cell.x, cell.y), cell_elevation)
+	var world_cell := _room_world_cell(cell)
+	return grid.grid_to_screen_position(Vector2(world_cell.x, world_cell.y), cell_elevation)
 
 func _visual_ground_offset() -> float:
 	return _tile_size().y * 0.5 + sprite_bottom_offset
@@ -314,9 +423,11 @@ func _update_visual_position() -> void:
 	_update_depth()
 
 func _current_depth() -> int:
+	# +1 keeps the player above tiles/carpets sharing the same cell and
+	# elevation; blocks in front still win by a full cell of depth.
 	if block_layer != null:
-		return block_layer.depth_for_cell(grid_position, elevation)
-	return (grid_position.x + grid_position.y) * 128 + grid_position.y * 16 + int(round(elevation))
+		return block_layer.depth_for_cell(grid_position, elevation) + 1
+	return (grid_position.x + grid_position.y) * 128 + grid_position.y * 16 + int(round(elevation)) + 1
 
 func _update_depth() -> void:
 	z_index = _current_depth()

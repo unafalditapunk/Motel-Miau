@@ -6,6 +6,8 @@ const EPSILON := 0.001
 
 var grid: IsometricGrid
 var room: Room
+var cell_origin := Vector2i.ZERO
+var compact_depth := false
 
 var _carpets := {}
 var _resync_queued := false
@@ -66,12 +68,18 @@ func _update_carpet_sprite(coordinates: Vector2i, cell: RoomCell) -> void:
 	sprite.rotation_degrees = float(cell.carpet_rotation_degrees)
 	sprite.flip_h = cell.carpet_flip
 	sprite.position = grid.grid_to_screen_position(_carpet_center(coordinates, footprint), cell.carpet_elevation)
+	if room != null:
+		room.apply_deemphasis_to(sprite)
 	var front_cell := coordinates + footprint - Vector2i.ONE
 	var depth := _depth_for_cell(front_cell, cell.carpet_elevation)
-	sprite.z_index = depth + DEPTH_OFFSET if cell.carpet_elevation <= EPSILON else depth
+	var depth_offset := -54 if compact_depth else DEPTH_OFFSET
+	sprite.z_index = depth + depth_offset if cell.carpet_elevation <= EPSILON else depth
 
 func _carpet_center(anchor: Vector2i, footprint: Vector2i) -> Vector2:
 	return Vector2(anchor) + Vector2(footprint - Vector2i.ONE) * 0.5
 
 func _depth_for_cell(cell: Vector2i, elevation: float) -> int:
-	return (cell.x + cell.y) * 128 + cell.y * 16 + int(round(elevation))
+	var world_cell := cell + cell_origin
+	if compact_depth:
+		return (world_cell.x + world_cell.y) * 48 + world_cell.y * 6 + int(round(elevation))
+	return (world_cell.x + world_cell.y) * 128 + world_cell.y * 16 + int(round(elevation))
