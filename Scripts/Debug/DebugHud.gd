@@ -76,16 +76,37 @@ func _build_text() -> String:
 	var cell := player.grid_position
 	var world_pos := player.global_position
 	var cell_screen := Vector2.ZERO
+	var world_cell := Vector2i.ZERO
 	if grid != null:
 		var anchor_cell := cell
 		if player.room != null:
 			anchor_cell = player.room.world_cell_coordinates(cell)
+		world_cell = anchor_cell
 		cell_screen = grid.grid_to_screen(anchor_cell, player.elevation)
-	lines.append("Grid cell:   (%d, %d)" % [cell.x, cell.y])
+	lines.append("Grid cell:   (%d, %d)   World cell: (%d, %d)" % [cell.x, cell.y, world_cell.x, world_cell.y])
+	var room_world := _room_world()
 	if player.room != null:
-		lines.append("Room:        (%d, %d)" % [player.room.room_coordinates.x, player.room.room_coordinates.y])
+		lines.append("Room:        (%d, %d)  size %s  origin %s" % [
+			player.room.room_coordinates.x, player.room.room_coordinates.y,
+			str(player.room.size), str(player.room.cell_origin)])
 	else:
 		lines.append("Room:        <none>")
+	if room_world != null:
+		var room_id: Vector2i = player.room.room_coordinates if player.room != null else room_world.primary_room_coordinates
+		var linked := room_world.get_connected_room_ids(room_id)
+		var linked_text := "none"
+		if not linked.is_empty():
+			var parts: Array[String] = []
+			for id in linked:
+				parts.append("(%d,%d)" % [id.x, id.y])
+			linked_text = ", ".join(parts)
+		var visible_rooms := room_world.get_visible_room_coordinates()
+		var de_emphasized := 0
+		for id in visible_rooms:
+			if id != room_world.primary_room_coordinates:
+				de_emphasized += 1
+		lines.append("Connections: %d from room  Visible rooms: %d  De-emphasized: %d" % [linked.size(), visible_rooms.size(), de_emphasized])
+		lines.append("Linked rooms: %s" % linked_text)
 	lines.append("World pos:   (%.2f, %.2f)" % [world_pos.x, world_pos.y])
 	lines.append("Cell anchor: (%.2f, %.2f)" % [cell_screen.x, cell_screen.y])
 	lines.append("Facing:      %s   Buffered: %s" % [str(player.facing_direction), str(player._buffered_direction)])
@@ -114,3 +135,6 @@ func _build_text() -> String:
 			lines.append("Mouse cell:  (%d, %d)" % [mouse_cell.x, mouse_cell.y])
 	lines.append("FPS:         %d" % Engine.get_frames_per_second())
 	return "\n".join(lines)
+
+func _room_world() -> RoomWorld:
+	return get_tree().get_first_node_in_group(&"room_worlds") as RoomWorld

@@ -49,12 +49,26 @@ func _expect(condition: bool, message: String) -> void:
 	if not condition:
 		_failures.append(message)
 
+const RING_SIZE := Vector2i(4, 4)
+const RING_IDS: Array[Vector2i] = [
+	Vector2i(0, -1), Vector2i(1, -1), Vector2i(2, -1), Vector2i(3, -1), Vector2i(4, -1),
+	Vector2i(0, 2), Vector2i(1, 2), Vector2i(2, 2), Vector2i(3, 2), Vector2i(4, 2),
+	Vector2i(-1, 0), Vector2i(-1, 1), Vector2i(-1, 2),
+	Vector2i(5, 0), Vector2i(5, 1), Vector2i(5, 2),
+]
+# With bounds-based spatial adjacency (padding 1), every ring room
+# touches the center's grown bounds, so the whole ring is visible.
+const HIDDEN_FROM_CENTER: Array[Vector2i] = []
+
 func _expected_coordinates() -> Array[Vector2i]:
-	var coordinates: Array[Vector2i] = []
-	for x in range(-1, 2):
-		for y in range(-1, 2):
-			coordinates.append(Vector2i(x, y))
+	var coordinates: Array[Vector2i] = [Vector2i.ZERO]
+	coordinates.append_array(RING_IDS)
 	return coordinates
+
+func _expected_size(room_coordinates: Vector2i) -> Vector2i:
+	if room_coordinates == Vector2i.ZERO and _world != null:
+		return _world.room.size
+	return RING_SIZE
 
 func _run_checks() -> void:
 	_expect(_player != null, "Player missing")
@@ -69,8 +83,9 @@ func _run_checks() -> void:
 		_expect(room != null, "missing room at %s" % room_coordinates)
 		if room == null:
 			continue
-		_expect(room.size == _world.room.size, "room %s has size %s, expected %s" % [room_coordinates, room.size, _world.room.size])
-		_expect(room.visible, "room %s is hidden while it is inside the primary neighborhood" % room_coordinates)
+		_expect(room.size == _expected_size(room_coordinates), "room %s has size %s, expected %s" % [room_coordinates, room.size, _expected_size(room_coordinates)])
+		var should_be_visible := not HIDDEN_FROM_CENTER.has(room_coordinates)
+		_expect(room.visible == should_be_visible, "room %s visible=%s, expected %s in center neighborhood" % [room_coordinates, room.visible, should_be_visible])
 	_expect(_world.room == _room_world.get_room(Vector2i.ZERO), "World room is not registered as room (0, 0)")
 	_expect(_world.room.room_coordinates == Vector2i.ZERO, "World room coordinates are %s" % _world.room.room_coordinates)
 	_expect(_player != null and _player.room == _world.room, "player is not bound to the World room")
@@ -113,17 +128,20 @@ func _test_transition() -> void:
 		return
 	_place_player(Vector2i.ZERO, edge_cell)
 	_player.request_move(Vector2i(1, 0))
-	_expect(_player.room != null and _player.room.room_coordinates == Vector2i(1, 0), "transition right did not reach room (1, 0), now %s" % (_player.room.room_coordinates if _player.room != null else "<none>"))
-	_expect(_player.grid_position == Vector2i(0, edge_cell.y), "transition right landed on %s, expected (0, %d)" % [_player.grid_position, edge_cell.y])
-	_expect(_room_world.primary_room_coordinates == Vector2i(1, 0), "primary room is %s after transition" % _room_world.primary_room_coordinates)
+	# Right edge of the 12x12 center maps onto the right column of 4x4
+	# ring rooms: y 0..3 -> (5,0), 4..7 -> (5,1), 8..11 -> (5,2).
+	var expected_room := Vector2i(5, edge_cell.y >> 2)
+	var expected_local := Vector2i(0, edge_cell.y & 3)
+	_expect(_player.room != null and _player.room.room_coordinates == expected_room, "transition right did not reach room %s, now %s" % [expected_room, _player.room.room_coordinates if _player.room != null else "<none>"])
+	_expect(_player.grid_position == expected_local, "transition right landed on %s, expected %s" % [_player.grid_position, expected_local])
+	_expect(_room_world.primary_room_coordinates == expected_room, "primary room is %s after transition" % _room_world.primary_room_coordinates)
 	var center := _room_world.get_room(Vector2i.ZERO)
-	var right := _room_world.get_room(Vector2i(1, 0))
+	var right := _room_world.get_room(expected_room)
 	_expect(center != null and center.deemphasis_material != null, "old primary room was not deemphasized")
 	_expect(right != null and right.deemphasis_material == null, "new primary room is still deemphasized")
-	var far_left := _room_world.get_room(Vector2i(-1, 1))
-	var near_bottom := _room_world.get_room(Vector2i(0, 1))
-	_expect(far_left != null and not far_left.visible, "room outside the new 3x3 neighborhood is still visible")
-	_expect(near_bottom != null and near_bottom.visible, "neighbor room inside the new 3x3 neighborhood is hidden")
+	var far_corner := _room_world.get_room(Vector2i(0, 2))
+	_expect(far_corner != null and not far_corner.visible, "room outside the connection neighborhood is still visible")
+	_expect(center != null and center.visible, "connected center room hidden while standing in ring room")
 
 func _test_room_saves() -> void:
 	if _room_world == null or _player == null:

@@ -24,8 +24,8 @@ var _is_moving := false
 var _move_elapsed := 0.0
 var _move_from := Vector2.ZERO
 var _move_to := Vector2.ZERO
-var _move_from_depth := 0
-var _move_to_depth := 0
+var _move_elev_from := 0.0
+var _move_elev_to := 0.0
 var _buffered_direction := Vector2i.ZERO
 var _held_moves: Dictionary = {}
 
@@ -159,16 +159,31 @@ func evaluate_transition(direction: Vector2i) -> Dictionary:
 	if room_world == null:
 		result["reason"] = &"no room world"
 		return result
-	var world_cell := _room_world_cell(grid_position) + direction
-	var dest_room := room_world.get_room_at_world_cell(world_cell) as Room
-	if dest_room == null or dest_room == room:
-		result["reason"] = &"no room beyond boundary"
-		return result
+	# An explicit room connection covering this exit cell takes precedence
+	# over geometric adjacency; its paired entry defines the destination.
+	var dest_room: Room = null
+	var dest_local := Vector2i.ZERO
+	var exit := room_world.find_room_exit(room, grid_position, direction)
+	if not exit.is_empty():
+		dest_room = room_world.get_room(exit["room_id"]) as Room
+		dest_local = exit["cell"]
+		if dest_room == null:
+			result["reason"] = &"connection destination missing"
+			return result
+	else:
+		if room_world.require_explicit_connections:
+			result["reason"] = &"no connection"
+			return result
+		var world_cell := _room_world_cell(grid_position) + direction
+		dest_room = room_world.get_room_at_world_cell(world_cell) as Room
+		if dest_room == null or dest_room == room:
+			result["reason"] = &"no room beyond boundary"
+			return result
+		dest_local = world_cell - dest_room.cell_origin
+		if dest_local.x < 0 or dest_local.y < 0 or dest_local.x >= dest_room.size.x or dest_local.y >= dest_room.size.y:
+			result["reason"] = &"outside destination room"
+			return result
 	room_world.ensure_room_loaded(dest_room)
-	var dest_local := world_cell - dest_room.cell_origin
-	if dest_local.x < 0 or dest_local.y < 0 or dest_local.x >= dest_room.size.x or dest_local.y >= dest_room.size.y:
-		result["reason"] = &"outside destination room"
-		return result
 	var surface := 0.0
 	var dest_layer := dest_room.block_layer
 	if dest_layer != null:
@@ -190,14 +205,13 @@ func _start_room_transition(direction: Vector2i) -> bool:
 	if not bool(info.get("valid", false)):
 		return false
 	var room_world := _room_world()
-	var world_cell := _room_world_cell(grid_position) + direction
-	var dest_room := room_world.get_room_at_world_cell(world_cell) as Room
+	var dest_room := room_world.get_room(info["room_coordinates"]) as Room
 	if dest_room == null:
 		return false
 	_set_facing(direction)
 	var previous_room := room
 	var from_screen := position
-	var from_depth := _current_depth()
+	var previous_elevation := elevation
 	room = dest_room
 	block_layer = dest_room.block_layer
 	room_size = dest_room.size
@@ -206,8 +220,42 @@ func _start_room_transition(direction: Vector2i) -> bool:
 	room_world.set_primary_room(dest_room.room_coordinates)
 	room_world.save_room_state(previous_room)
 	var to_screen := _screen_position_for_cell(grid_position, elevation)
-	var to_depth := _current_depth()
-	return _play_move(from_screen, from_depth, to_screen, to_depth)
+	return _play_move(from_screen, to_screen, previous_elevation, elevation)
+
+## Attempts an interactive (non-spatial) connection transition. entry is
+## the Dictionary returned by RoomWorld.find_interactive_entry. Returns
+## false — leaving the player in place — when the destination is missing,
+## out of bounds, or blocked.
+func _try_connection_transition(entry: Dictionary, from_screen: Vector2, from_elevation: float) -> bool:
+	var room_world := _room_world()
+	if room_world == null or room == null:
+		return false
+	var dest_room := room_world.get_room(entry["room_id"]) as Room
+	if dest_room == null:
+		return false
+	var dest_local: Vector2i = entry["cell"]
+	if dest_local.x < 0 or dest_local.y < 0 or dest_local.x >= dest_room.size.x or dest_local.y >= dest_room.size.y:
+		return false
+	room_world.ensure_room_loaded(dest_room)
+	var surface := 0.0
+	var dest_layer := dest_room.block_layer
+	if dest_layer != null:
+		surface = dest_layer.get_surface_elevation(dest_local)
+	if absf(surface - elevation) > max_step_height + 0.001:
+		return false
+	if dest_layer != null and not (dest_layer.can_actor_stand(dest_local, surface, height_units) and dest_layer.is_standable_surface(dest_local, surface)):
+		return false
+	var previous_room := room
+	var previous_elevation := from_elevation
+	room = dest_room
+	block_layer = dest_room.block_layer
+	room_size = dest_room.size
+	grid_position = dest_local
+	elevation = surface
+	room_world.set_primary_room(dest_room.room_coordinates)
+	room_world.save_room_state(previous_room)
+	var to_screen := _screen_position_for_cell(grid_position, elevation)
+	return _play_move(from_screen, to_screen, previous_elevation, elevation)
 
 func _start_move(direction: Vector2i) -> bool:
 	var target := grid_position + direction
@@ -218,19 +266,24 @@ func _start_move(direction: Vector2i) -> bool:
 	_set_facing(direction)
 
 	var from_screen := position
-	var from_depth := _current_depth()
+	var from_elevation := elevation
 	var target_elevation := movement_elevation_for(target)
-	var to_screen := _screen_position_for_cell(target, target_elevation)
-
 	grid_position = target
 	elevation = target_elevation
-	var to_depth := _current_depth()
-	return _play_move(from_screen, from_depth, to_screen, to_depth)
+	# Interactive room connections trigger on entering their source cell.
+	# If the transition fails validation the player simply stays on the cell.
+	var room_world := _room_world()
+	if room_world != null and room != null:
+		var entry := room_world.find_interactive_entry(room.room_coordinates, target)
+		if not entry.is_empty() and _try_connection_transition(entry, from_screen, from_elevation):
+			return true
+	var to_screen := _screen_position_for_cell(target, target_elevation)
+	return _play_move(from_screen, to_screen, from_elevation, target_elevation)
 
-func _play_move(from_screen: Vector2, from_depth: int, to_screen: Vector2, to_depth: int) -> bool:
+func _play_move(from_screen: Vector2, to_screen: Vector2, from_elevation: float, to_elevation: float) -> bool:
 	if move_duration <= 0.0 or grid == null:
 		position = to_screen
-		z_index = to_depth
+		_update_depth()
 		_is_moving = false
 		return true
 
@@ -238,9 +291,9 @@ func _play_move(from_screen: Vector2, from_depth: int, to_screen: Vector2, to_de
 	_move_elapsed = 0.0
 	_move_from = from_screen
 	_move_to = to_screen
-	_move_from_depth = from_depth
-	_move_to_depth = to_depth
-	z_index = maxi(from_depth, to_depth)
+	_move_elev_from = from_elevation
+	_move_elev_to = to_elevation
+	z_index = _depth_for_screen_position(position, _move_elev_from)
 	return true
 
 func _process(delta: float) -> void:
@@ -251,7 +304,8 @@ func _process(delta: float) -> void:
 	var t := clampf(_move_elapsed / move_duration, 0.0, 1.0)
 	var eased := t * t * (3.0 - 2.0 * t)
 	position = _move_from.lerp(_move_to, eased)
-	z_index = maxi(_move_from_depth, _move_to_depth)
+	var visual_elevation := lerpf(_move_elev_from, _move_elev_to, eased)
+	z_index = _depth_for_screen_position(position, visual_elevation)
 	if t >= 1.0:
 		_finish_move()
 
@@ -422,12 +476,23 @@ func _update_visual_position() -> void:
 	position = _screen_position_for_cell(grid_position, elevation)
 	_update_depth()
 
+func _depth_for_screen_position(screen_position: Vector2, cell_elevation: float) -> int:
+	if grid == null:
+		return z_index
+	var anchored := screen_position + Vector2(0.0, cell_elevation * grid.height_pixels_per_unit)
+	var world_cell := grid.screen_to_grid(anchored)
+	if block_layer != null:
+		return block_layer.depth_for_cell(world_cell - block_layer.cell_origin, cell_elevation) + 1
+	world_cell = grid.depth_cell(world_cell)
+	return (world_cell.x + world_cell.y) * 128 + world_cell.y * 16 + int(round(cell_elevation)) + 1
+
 func _current_depth() -> int:
 	# +1 keeps the player above tiles/carpets sharing the same cell and
 	# elevation; blocks in front still win by a full cell of depth.
 	if block_layer != null:
 		return block_layer.depth_for_cell(grid_position, elevation) + 1
-	return (grid_position.x + grid_position.y) * 128 + grid_position.y * 16 + int(round(elevation)) + 1
+	var depth_cell := grid.depth_cell(_room_world_cell(grid_position)) if room != null else grid.depth_cell(grid_position)
+	return (depth_cell.x + depth_cell.y) * 128 + depth_cell.y * 16 + int(round(elevation)) + 1
 
 func _update_depth() -> void:
 	z_index = _current_depth()

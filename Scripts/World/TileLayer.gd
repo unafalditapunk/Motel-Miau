@@ -65,8 +65,13 @@ func _update_tile_sprite(coordinates: Vector2i, cell: RoomCell) -> void:
 	var depth_offset := -54 if compact_depth else -145
 	sprite.z_index = depth + depth_offset if cell.tile_elevation <= 0.001 else depth
 
+func refresh_depths() -> void:
+	_resync_tiles()
+
 func _depth_for_cell(cell: Vector2i, elevation: float) -> int:
 	var world_cell := cell + cell_origin
+	if grid != null:
+		world_cell = grid.depth_cell(world_cell)
 	if compact_depth:
 		return (world_cell.x + world_cell.y) * 48 + world_cell.y * 6 + int(round(elevation))
 	return (world_cell.x + world_cell.y) * 128 + world_cell.y * 16 + int(round(elevation))

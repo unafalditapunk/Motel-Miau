@@ -104,7 +104,7 @@ func _test_positions() -> void:
 			var neighbor := _room_world.get_room(neighbor_coordinates)
 			if neighbor == null:
 				continue
-			var mid := room.size / 2
+			var mid := Vector2i(floori(room.size.x * 0.5), floori(room.size.y * 0.5))
 			var current_local: Vector2i
 			var neighbor_local: Vector2i
 			if direction == Vector2i(1, 0):

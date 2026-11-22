@@ -66,3 +66,55 @@ func get_rooms() -> Array[Room]:
 
 func clear() -> void:
 	_rooms.clear()
+
+# ------------------------------------------------------------------
+# World layout queries
+# ------------------------------------------------------------------
+# Rooms are keyed by their unique room_coordinates ID; their position in
+# the shared world grid is the room's cell_origin (global_origin) plus
+# its own size. Rooms may have different sizes and arbitrary origins.
+
+## Global cell bounds of a room: [cell_origin, cell_origin + size).
+func global_bounds(room: Room) -> Rect2i:
+	if room == null:
+		return Rect2i()
+	return Rect2i(room.cell_origin, room.size)
+
+## Returns the registered room whose global cell bounds contain the given
+## world-grid cell, or null when no room covers it.
+func get_room_at_global_cell(global_cell: Vector2i) -> Room:
+	for room in get_rooms():
+		var local := global_cell - room.cell_origin
+		if local.x >= 0 and local.y >= 0 and local.x < room.size.x and local.y < room.size.y:
+			return room
+	return null
+
+## True when the two rooms' global cell bounds overlap by at least one
+## cell. Rooms that merely share an edge do not overlap.
+func rooms_overlap(first: Room, second: Room) -> bool:
+	if first == null or second == null or first == second:
+		return false
+	return global_bounds(first).intersects(global_bounds(second))
+
+## Returns the first registered room whose bounds overlap the given
+## room's bounds, or null when the layout is clear.
+func find_overlap(room: Room) -> Room:
+	if room == null:
+		return null
+	for other in get_rooms():
+		if rooms_overlap(room, other):
+			return other
+	return null
+
+## Human-readable layout problems (overlapping rooms). Empty means the
+## layout is valid.
+func validate_layout() -> Array[String]:
+	var problems: Array[String] = []
+	var rooms := get_rooms()
+	for i in range(rooms.size()):
+		for j in range(i + 1, rooms.size()):
+			if rooms_overlap(rooms[i], rooms[j]):
+				problems.append("rooms '%s' (%s) and '%s' (%s) overlap" % [
+					rooms[i].name, rooms[i].room_coordinates,
+					rooms[j].name, rooms[j].room_coordinates])
+	return problems

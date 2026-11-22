@@ -13,6 +13,15 @@ signal cells_changed
 @export var room_coordinates := Vector2i.ZERO
 @export var cell_origin := Vector2i.ZERO
 
+## World-grid origin of this room: the global cell coordinate that local
+## cell (0, 0) maps to. Backed by cell_origin, which every layer already
+## uses as the local->global cell offset.
+var global_origin: Vector2i:
+	get:
+		return cell_origin
+	set(value):
+		cell_origin = value
+
 var cells := {}
 var hovered_cell: Vector2i = Vector2i(-1, -1)
 var hovered_elevation := 0.0
@@ -184,6 +193,10 @@ func world_cell_coordinates(local_coordinates: Vector2i) -> Vector2i:
 
 func local_cell_coordinates(world_coordinates: Vector2i) -> Vector2i:
 	return world_coordinates - cell_origin
+
+## Global cell bounds of this room: [global_origin, global_origin + size).
+func global_bounds() -> Rect2i:
+	return Rect2i(cell_origin, size)
 
 func cell_to_world(coordinates: Vector2i, elevation := 0.0) -> Vector2:
 	if grid == null:

@@ -7,6 +7,16 @@ extends Resource
 @export var origin := Vector2i.ZERO
 @export var screen_offset := Vector2.ZERO
 
+## World cell subtracted from global cells before z_index depth sorting.
+## RoomWorld recenters this from the registered room bounds so depth
+## values stay inside Godot's +/-4096 canvas range no matter where rooms
+## sit in the world grid. Zero means raw world-cell depth (small worlds).
+var depth_cell_center := Vector2i.ZERO
+
+## Global cell shifted into normalized depth space.
+func depth_cell(global_cell: Vector2i) -> Vector2i:
+	return global_cell - depth_cell_center
+
 func grid_to_screen(grid_position: Vector2i, elevation: float = 0.0) -> Vector2:
 	return grid_to_screen_position(Vector2(grid_position.x, grid_position.y), elevation)
 

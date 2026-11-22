@@ -198,6 +198,8 @@ func get_surface_elevation(cell: Vector2i) -> float:
 
 func depth_for_cell(cell: Vector2i, elevation: float = 0.0) -> int:
 	var world_cell := cell + cell_origin
+	if grid != null:
+		world_cell = grid.depth_cell(world_cell)
 	if compact_depth:
 		return (world_cell.x + world_cell.y) * 48 + world_cell.y * 6 + int(round(elevation))
 	return (world_cell.x + world_cell.y) * 128 + world_cell.y * 16 + int(round(elevation))

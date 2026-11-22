@@ -78,8 +78,13 @@ func _update_carpet_sprite(coordinates: Vector2i, cell: RoomCell) -> void:
 func _carpet_center(anchor: Vector2i, footprint: Vector2i) -> Vector2:
 	return Vector2(anchor) + Vector2(footprint - Vector2i.ONE) * 0.5
 
+func refresh_depths() -> void:
+	_resync_carpets()
+
 func _depth_for_cell(cell: Vector2i, elevation: float) -> int:
 	var world_cell := cell + cell_origin
+	if grid != null:
+		world_cell = grid.depth_cell(world_cell)
 	if compact_depth:
 		return (world_cell.x + world_cell.y) * 48 + world_cell.y * 6 + int(round(elevation))
 	return (world_cell.x + world_cell.y) * 128 + world_cell.y * 16 + int(round(elevation))

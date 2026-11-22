@@ -123,6 +123,57 @@ static func room_state_candidates(room_coordinates: Vector2i, size: Vector2i) ->
 static func player_state_path() -> String:
 	return SAVE_DIR.path_join("player_state.json")
 
+static func connections_path() -> String:
+	return SAVE_DIR.path_join("connections.json")
+
+## Saves the RoomWorld's explicit room connection graph. Connections are
+## world-layout data, stored separately from per-room contents.
+static func save_connections(room_world: RoomWorld) -> Error:
+	if room_world == null:
+		push_error("RoomSaveSystem.save_connections requires a RoomWorld.")
+		return ERR_INVALID_PARAMETER
+	if not _ensure_save_dir():
+		push_error("RoomSaveSystem could not create save dir '%s'." % SAVE_DIR)
+		return ERR_CANT_CREATE
+	var path := connections_path()
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		push_error("RoomSaveSystem could not open '%s' for writing: %s" % [path, error_string(FileAccess.get_open_error())])
+		return FileAccess.get_open_error()
+	file.store_string(JSON.stringify({
+		"version": VERSION,
+		"connections": room_world.connections.serialize_all(),
+	}, "\t"))
+	file.close()
+	return OK
+
+## Restores the room connection graph. Must be called after all rooms are
+## registered; entries referencing missing rooms or invalid cells are
+## skipped with warnings. Returns false when no connections file exists.
+static func load_connections(room_world: RoomWorld) -> bool:
+	if room_world == null:
+		push_error("RoomSaveSystem.load_connections requires a RoomWorld.")
+		return false
+	var path := connections_path()
+	if not FileAccess.file_exists(path):
+		return false
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		push_error("RoomSaveSystem could not open '%s': %s" % [path, error_string(FileAccess.get_open_error())])
+		return false
+	var parsed: Variant = JSON.parse_string(file.get_as_text())
+	file.close()
+	if not (parsed is Dictionary):
+		push_error("RoomSaveSystem: '%s' is not valid JSON." % path)
+		return false
+	var data: Dictionary = parsed
+	if _as_int(data.get("version")) != VERSION:
+		push_error("RoomSaveSystem: '%s' has unsupported version." % path)
+		return false
+	var loaded := room_world.connections.deserialize_all(data.get("connections", []))
+	print("RoomSaveSystem loaded %d room connection(s) from '%s'." % [loaded, path])
+	return true
+
 ## Saves a single RoomWorld room's contents (blocks, furniture, carpets,
 ## tiles). Player position is stored separately via save_player_state().
 static func save_room_world_room(room_world: RoomWorld, room: Room) -> Error:
@@ -273,6 +324,7 @@ static func _collect_room_data(room: Room, block_layer: BlockLayer, player: Play
 		"room_id": room_id,
 		"display_name": display_name,
 		"size": [room.size.x, room.size.y],
+		"global_origin": [room.cell_origin.x, room.cell_origin.y],
 		"grid_resource": room.grid.resource_path if room.grid != null else "",
 		"spawn_position": [spawn.x, spawn.y],
 		"player": _serialize_player(player),
@@ -373,6 +425,12 @@ static func _apply_data(
 	if size == Vector2i.ZERO:
 		push_error("RoomSaveSystem: cannot apply data with invalid size.")
 		return false
+	# The room's position in the world layout is owned by RoomWorld
+	# registration, not by the save. The saved origin is kept for
+	# reference/migration; a mismatch is reported but never applied here.
+	var saved_origin = _read_vec2i(data.get("global_origin"))
+	if saved_origin != null and saved_origin != room.cell_origin:
+		push_warning("RoomSaveSystem: save global_origin %s differs from room origin %s; room keeps its registered position." % [saved_origin, room.cell_origin])
 	var grid := _resolve_grid(room, definition_grid, str(data.get("grid_resource", "")))
 	if grid == null:
 		push_error("RoomSaveSystem: no IsometricGrid available for load.")

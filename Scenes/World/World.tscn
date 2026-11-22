@@ -1,7 +1,7 @@
 [gd_scene load_steps=16 format=3]
 
 [ext_resource type="Script" path="res://Scripts/World/World.gd" id="1"]
-[ext_resource type="Resource" path="res://Resources/Rooms/StarterRoom.tres" id="2"]
+[ext_resource type="Resource" path="res://Resources/Rooms/MotelCenter.tres" id="2"]
 [ext_resource type="Resource" path="res://Resources/FurnitureCatalog.tres" id="3"]
 [ext_resource type="Resource" path="res://Resources/BlockCatalog.tres" id="4"]
 [ext_resource type="PackedScene" path="res://Scenes/Player/Player.tscn" id="5"]
