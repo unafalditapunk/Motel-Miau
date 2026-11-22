@@ -2,13 +2,13 @@ extends SceneTree
 
 var _frames := 0
 var _failures: Array[String] = []
-var _world: World
+var _world: WorldBootstrap
 var _room: Room
 var _controller: BlockPlacementController
 var _tile_def: TileDefinition
 
 func _initialize() -> void:
-	_world = load("res://Scenes/World/World.tscn").instantiate()
+	_world = load("res://Scenes/World/WorldBootstrap.tscn").instantiate()
 	root.add_child(_world)
 
 func _process(_delta: float) -> bool:
@@ -80,7 +80,7 @@ func _run_checks() -> void:
 
 	# Save data records the destroyed cell as an empty tile id.
 	_room.clear_cell_tile(cell)
-	var data := RoomSaveSystem.collect_room_data(_world)
+	var data := RoomSaveSystem.collect_room_state(_room, _world.block_layer, _world.player)
 	var tiles: Array = data.get("tiles", [])
 	var found_bare := false
 	for entry in tiles:
@@ -91,7 +91,7 @@ func _run_checks() -> void:
 	_expect(validation["ok"], "collected room data failed validation: %s" % str(validation["errors"]))
 
 	# Round-trip: apply_data rebuilds cells from defaults then reapplies deltas.
-	RoomSaveSystem.apply_data(_world, data)
+	RoomSaveSystem.apply_room_state(_world.room_world, _room, data, _world.player)
 	_expect(_room.get_cell_tile(cell) == null, "apply_data did not restore bare cell")
 	var other := _free_cell()
 	if other != Vector2i(-1, -1) and other != cell:
@@ -118,8 +118,8 @@ func _run_checks() -> void:
 		var sprite: Sprite2D = _world.tile_layer._tiles[blocked]
 		_expect(is_equal_approx(sprite.position.y, _world.room.grid.grid_to_screen_position(Vector2(blocked), surface).y),
 			"elevated tile sprite not positioned at surface height")
-		var surface_depth := (blocked.x + blocked.y) * 128 + blocked.y * 16 + int(round(surface))
-		var expected_z := surface_depth if surface > 0.001 else surface_depth - 145
+		var surface_depth := _world.tile_layer._depth_for_cell(blocked, surface)
+		var expected_z := surface_depth if surface > 0.001 else surface_depth + (-54 if _world.tile_layer.compact_depth else -145)
 		_expect(sprite.z_index == expected_z, "tile z_index %d != expected %d" % [sprite.z_index, expected_z])
 		var top_block_z := -2147483648
 		for block in _world.block_layer.get_blocks_at(blocked):
@@ -133,7 +133,7 @@ func _run_checks() -> void:
 			"hover pick elevation %.2f != tile surface %.2f" % [float(pick["elevation"]), surface])
 
 		# Elevated tiles round-trip through save data with their elevation.
-		var elevated_data := RoomSaveSystem.collect_room_data(_world)
+		var elevated_data := RoomSaveSystem.collect_room_state(_room, _world.block_layer, _world.player)
 		var elevated_entry: Dictionary = {}
 		for entry in elevated_data.get("tiles", []):
 			if entry is Dictionary and entry.get("position") == [blocked.x, blocked.y]:
@@ -142,7 +142,7 @@ func _run_checks() -> void:
 		_expect(is_equal_approx(float(elevated_entry.get("elevation", -1.0)), surface),
 			"saved tile elevation %.2f != surface %.2f" % [float(elevated_entry.get("elevation", -1.0)), surface])
 		_room.set_cell_tile(blocked, null)
-		RoomSaveSystem.apply_data(_world, elevated_data)
+		RoomSaveSystem.apply_room_state(_world.room_world, _room, elevated_data, _world.player)
 		_expect(is_equal_approx(_room.get_cell(blocked).tile_elevation, surface),
 			"apply_data did not restore elevated tile (got %.2f)" % _room.get_cell(blocked).tile_elevation)
 

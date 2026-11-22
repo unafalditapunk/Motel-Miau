@@ -16,7 +16,7 @@ func _initialize() -> void:
 func _process(_delta: float) -> bool:
 	_frames += 1
 	if _frames == 1:
-		_camera = _main.get_node("World/WorldCamera")
+		_camera = _main.get_node("WorldBootstrap/WorldCamera")
 		_player = _main.find_child("Player", true, false) as Player
 		if _camera == null or _player == null:
 			push_error("CAMERA_SMOKE: missing camera or player")

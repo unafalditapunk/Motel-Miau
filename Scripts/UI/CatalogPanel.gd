@@ -7,7 +7,10 @@ const PANEL_WIDTH := 216.0
 const PANEL_HEIGHT := 240.0
 const GRID_COLUMNS := 4
 const ITEM_SIZE := Vector2(44.0, 44.0)
-const TOGGLE_KEY := KEY_Q
+## Q toggles the catalog while Build Mode is active. Creation Mode
+## reserves Q for exiting the editor, so the key is only intercepted
+## when creation mode is not active (toggle() guards too).
+const CATALOG_KEY := KEY_Q
 
 var building_selector: BuildingSelector
 var catalog_open := false:
@@ -36,22 +39,28 @@ func _ready() -> void:
 		_connect_selector()
 		_refresh_all()
 
+func _unhandled_input(event: InputEvent) -> void:
+	if not (event is InputEventKey):
+		return
+	var key_event := event as InputEventKey
+	if not key_event.pressed or key_event.echo:
+		return
+	# Only Build Mode owns Q; in Play Mode and Creation Mode the key is
+	# left alone so FloorEditor/FloorPanel shortcuts keep working.
+	if key_event.physical_keycode == CATALOG_KEY \
+			and _construction_mode_active() and not _creation_mode_active():
+		toggle()
+		get_viewport().set_input_as_handled()
+
 func _process(_delta: float) -> void:
 	if _controller == null:
 		_controller = get_tree().get_first_node_in_group(&"block_placement_controller") as BlockPlacementController
 		if _controller != null and not _controller.construction_mode_changed.is_connected(_on_mode_changed):
 			_controller.construction_mode_changed.connect(_on_mode_changed)
 
-func _unhandled_input(event: InputEvent) -> void:
-	if not (event is InputEventKey):
-		return
-	var key_event := event as InputEventKey
-	if not key_event.pressed or key_event.echo or key_event.keycode != TOGGLE_KEY:
-		return
-	toggle()
-	get_viewport().set_input_as_handled()
-
 func open() -> void:
+	if _creation_mode_active():
+		return
 	if _construction_mode_active():
 		catalog_open = true
 
@@ -61,8 +70,11 @@ func close() -> void:
 func toggle() -> void:
 	if catalog_open:
 		catalog_open = false
-	elif _construction_mode_active():
+	elif not _creation_mode_active() and _construction_mode_active():
 		catalog_open = true
+
+func _creation_mode_active() -> bool:
+	return FloorEditor.any_active(get_tree())
 
 func _construction_mode_active() -> bool:
 	if _controller == null:

@@ -3,6 +3,11 @@ extends Node2D
 
 const EPSILON := 0.001
 
+## Emitted after the layer's block set changes (place, furniture place,
+## remove, clear). RoomWorld forwards this as room_content_changed for
+## floor dirty tracking. Also fires during save/load application.
+signal content_changed
+
 @export var grid: IsometricGrid
 @export var room_size := Vector2i(10, 10)
 var room: Room
@@ -41,6 +46,7 @@ func clear_blocks() -> void:
 			block.queue_free()
 	blocks.clear()
 	_occupancy.clear()
+	content_changed.emit()
 
 func _load_placements() -> void:
 	for placement_resource in block_placements:
@@ -140,6 +146,7 @@ func place_block(definition: BlockDefinition, grid_position: Vector2i, elevation
 	block.position = _footprint_screen_position(definition.footprint, grid_position, elevation)
 	block.z_index = depth_for_block(block)
 	_register(block)
+	content_changed.emit()
 	return block
 
 func place_block_id(object_id: StringName, grid_position: Vector2i, elevation: float = 0.0) -> Block:
@@ -165,6 +172,7 @@ func place_furniture(definition: FurnitureDefinition, grid_position: Vector2i, e
 	furniture.position = _footprint_screen_position(furniture.footprint, grid_position, elevation)
 	furniture.z_index = depth_for_block(furniture)
 	_register(furniture)
+	content_changed.emit()
 	return furniture
 
 func remove_block(block: Block) -> void:
@@ -174,6 +182,7 @@ func remove_block(block: Block) -> void:
 	blocks.erase(block)
 	if is_instance_valid(block):
 		block.queue_free()
+	content_changed.emit()
 
 func get_blocks_at(cell: Vector2i) -> Array[Block]:
 	var result: Array[Block] = []

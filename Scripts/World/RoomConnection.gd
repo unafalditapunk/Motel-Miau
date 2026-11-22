@@ -38,6 +38,10 @@ const KEY_TYPES := {
 @export var destination_cells: Array[Vector2i] = []
 @export var interactive := false
 @export var bidirectional := true
+## Optional ground marker sprite shown at this connection's cells. When
+## null, RoomWorld falls back to its per-type marker texture (if any);
+## when both are null no marker is drawn.
+@export var marker_texture: Texture2D
 
 static func type_key(type: int) -> String:
 	return TYPE_KEYS.get(type, "door")

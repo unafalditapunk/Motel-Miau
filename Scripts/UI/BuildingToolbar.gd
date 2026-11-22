@@ -11,7 +11,7 @@ const CATEGORY_FURNITURE := &"furniture"
 
 var placement_controller: BlockPlacementController
 var building_selector: BuildingSelector
-var world: World
+var world: WorldBootstrap
 var catalog_panel: CatalogPanel
 
 var _normal_button: Button
@@ -30,13 +30,13 @@ func _process(_delta: float) -> void:
 		placement_controller = get_tree().get_first_node_in_group(&"block_placement_controller") as BlockPlacementController
 		_bind_controller()
 	if world == null:
-		world = get_tree().get_first_node_in_group(&"world") as World
+		world = get_tree().get_first_node_in_group(&"world") as WorldBootstrap
 	if building_selector == null:
 		building_selector = _find_building_selector()
 	if catalog_panel == null:
 		catalog_panel = _find_catalog_panel()
 
-func setup(controller: BlockPlacementController, selector: BuildingSelector, world_ref: World, catalog: CatalogPanel) -> void:
+func setup(controller: BlockPlacementController, selector: BuildingSelector, world_ref: WorldBootstrap, catalog: CatalogPanel) -> void:
 	placement_controller = controller
 	building_selector = selector
 	world = world_ref
@@ -168,16 +168,16 @@ func _on_furniture_pressed() -> void:
 
 func _on_save_pressed() -> void:
 	if world != null:
-		world.save_room()
+		world.save_game()
 
 func _find_building_selector() -> BuildingSelector:
-	var world_node := get_tree().get_first_node_in_group(&"world") as World
+	var world_node := get_tree().get_first_node_in_group(&"world") as WorldBootstrap
 	if world_node == null:
 		return null
 	return world_node.get_node_or_null(^"BuildingSelector") as BuildingSelector
 
 func _find_catalog_panel() -> CatalogPanel:
-	var world_node := get_tree().get_first_node_in_group(&"world") as World
+	var world_node := get_tree().get_first_node_in_group(&"world") as WorldBootstrap
 	if world_node == null:
 		return null
 	return world_node.get_node_or_null(^"CatalogPanel") as CatalogPanel

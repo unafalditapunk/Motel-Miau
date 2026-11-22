@@ -124,11 +124,12 @@ func _register_demo_connections() -> void:
 	portal.interactive = true
 	portal.bidirectional = false
 	_room_world.register_connection(portal)
-	# Mark the portal trigger cell with a flower carpet so it is visible.
+	# Mark the portal with the flower sprite via the connection marker
+	# system so the trigger cell is visible without placing a carpet.
 	var flower := _room_world.carpet_catalog.get_definition(&"flower_carpet") if _room_world.carpet_catalog != null else null
-	var source_room := _room_world.get_room(Vector2i(2, -1))
-	if flower != null and source_room != null:
-		source_room.place_carpet(flower, portal.source_cells[0], 0)
+	if flower != null and flower.sprite_texture != null:
+		portal.marker_texture = flower.sprite_texture
+		_room_world.visuals.refresh_connection_markers()
 
 func _spawn_player() -> void:
 	var room_a := _room_world.get_room(Vector2i(0, 0))

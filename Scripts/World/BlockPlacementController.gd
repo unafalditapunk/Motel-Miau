@@ -60,6 +60,11 @@ func _bind_room(new_room: Room) -> void:
 	block_layer = new_room.block_layer if new_room != null else null
 
 func _unhandled_input(event: InputEvent) -> void:
+	# Modal world UI (FloorPanel) and Creation Mode suspend all building
+	# interaction. Events are left unhandled so F-keys and other UI
+	# shortcuts keep working.
+	if FloorPanel.any_open(get_tree()) or FloorEditor.any_active(get_tree()):
+		return
 	if event is InputEventKey:
 		var key_event := event as InputEventKey
 		if not key_event.pressed or key_event.echo:

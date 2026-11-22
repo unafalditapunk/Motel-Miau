@@ -119,8 +119,14 @@ func _cancel_movement() -> void:
 	_move_elapsed = 0.0
 	_buffered_direction = Vector2i.ZERO
 
+## True while a modal world UI (FloorPanel) or Creation Mode is active;
+## movement input is ignored so the player can't walk behind the UI or
+## interfere with floor editing.
+func _world_ui_blocked() -> bool:
+	return FloorPanel.any_open(get_tree()) or FloorEditor.any_active(get_tree())
+
 func request_move(direction: Vector2i) -> void:
-	if direction == Vector2i.ZERO:
+	if direction == Vector2i.ZERO or _world_ui_blocked():
 		return
 	if _is_moving:
 		if buffer_movement_input:
@@ -153,6 +159,12 @@ func evaluate_transition(direction: Vector2i) -> Dictionary:
 		result["reason"] = &"no room context"
 		return result
 	if not _is_cardinal_direction(direction):
+		return result
+	# Room connections only matter when the step leaves the room; probing
+	# an in-bounds step must not consult the exit graph (covered corner
+	# cells would otherwise look like ambiguous exits).
+	if _inside_room_bounds(grid_position + direction):
+		result["reason"] = &"inside room"
 		return result
 	result["attempted"] = true
 	var room_world := _room_world()
@@ -258,6 +270,8 @@ func _try_connection_transition(entry: Dictionary, from_screen: Vector2, from_el
 	return _play_move(from_screen, to_screen, previous_elevation, elevation)
 
 func _start_move(direction: Vector2i) -> bool:
+	if _world_ui_blocked():
+		return false
 	var target := grid_position + direction
 	if not _inside_room_bounds(target):
 		return _start_room_transition(direction)
@@ -321,6 +335,10 @@ func _finish_move() -> void:
 	_start_move(direction)
 
 func _unhandled_key_input(event: InputEvent) -> void:
+	if _world_ui_blocked():
+		_held_moves.clear()
+		_buffered_direction = Vector2i.ZERO
+		return
 	if not (event is InputEventKey):
 		return
 	var key_event := event as InputEventKey
@@ -337,7 +355,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		_held_moves.erase(key_event.physical_keycode)
 
 func _update_held_movement() -> void:
-	if _held_moves.is_empty():
+	if _held_moves.is_empty() or _world_ui_blocked():
 		return
 	var now := Time.get_ticks_msec()
 	var direction := Vector2i.ZERO
@@ -495,7 +513,10 @@ func _current_depth() -> int:
 	return (depth_cell.x + depth_cell.y) * 128 + depth_cell.y * 16 + int(round(elevation)) + 1
 
 func _update_depth() -> void:
-	z_index = _current_depth()
+	# Clamp: during floor switches the depth center can recenter while
+	# block_layer still points at a room being torn down, producing
+	# out-of-range values.
+	z_index = clampi(_current_depth(), -4096, 4096)
 
 func _tile_size() -> Vector2:
 	if grid != null:

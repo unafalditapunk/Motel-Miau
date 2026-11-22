@@ -7,93 +7,11 @@ extends RefCounted
 ## catalog definitions on load.
 
 const SAVE_DIR := "user://saves"
+## Active save directory. Tests and developer tools may redirect this to a
+## scratch directory; gameplay never changes it.
+static var save_dir := SAVE_DIR
 const VERSION := 1
-const DEFAULT_ROOM_NAME := "room"
 const MAX_ROOM_DIMENSION := 4096
-
-# ------------------------------------------------------------------
-# Public API
-# ------------------------------------------------------------------
-
-static func save_path(room_name: String) -> String:
-	return SAVE_DIR.path_join("%s.json" % sanitize_room_name(room_name))
-
-static func sanitize_room_name(room_name: String) -> String:
-	var re := RegEx.new()
-	re.compile("[^A-Za-z0-9_-]+")
-	var cleaned := re.sub(room_name.strip_edges(), "_", true)
-	return cleaned if not cleaned.is_empty() else DEFAULT_ROOM_NAME
-
-## Saves the current state of the world's room. When room_name is empty
-## the room_definition's room_id is used as the save name.
-static func save_room(world: World, room_name := "") -> Error:
-	if world == null or world.room == null or world.block_layer == null:
-		push_error("RoomSaveSystem.save_room requires a World with Room and BlockLayer.")
-		return ERR_INVALID_PARAMETER
-	if room_name.is_empty():
-		room_name = _room_name(world)
-	if not _ensure_save_dir():
-		push_error("RoomSaveSystem could not create save dir '%s'." % SAVE_DIR)
-		return ERR_CANT_CREATE
-	var path := save_path(room_name)
-	var file := FileAccess.open(path, FileAccess.WRITE)
-	if file == null:
-		push_error("RoomSaveSystem could not open '%s' for writing: %s" % [path, error_string(FileAccess.get_open_error())])
-		return FileAccess.get_open_error()
-	file.store_string(JSON.stringify(collect_room_data(world), "\t"))
-	file.close()
-	return OK
-
-## Loads a saved room into the world. When room_name is empty, the save
-## matching the current room_id is used; if missing, the most recently
-## modified save in the save directory is loaded instead.
-static func load_room(world: World, room_name := "") -> bool:
-	if world == null or world.room == null or world.block_layer == null:
-		push_error("RoomSaveSystem.load_room requires a World with Room and BlockLayer.")
-		return false
-	var path := resolve_save_path(world, room_name)
-	if path.is_empty():
-		push_error("RoomSaveSystem: no save files found in '%s'." % SAVE_DIR)
-		return false
-	var file := FileAccess.open(path, FileAccess.READ)
-	if file == null:
-		push_error("RoomSaveSystem could not open '%s': %s" % [path, error_string(FileAccess.get_open_error())])
-		return false
-	var text := file.get_as_text()
-	file.close()
-	var parsed: Variant = JSON.parse_string(text)
-	if not (parsed is Dictionary):
-		push_error("RoomSaveSystem: '%s' is not valid JSON." % path)
-		return false
-	var data: Dictionary = parsed
-	var validation := validate_data(data)
-	if not validation["ok"]:
-		for error in validation["errors"]:
-			push_error("RoomSaveSystem: %s" % str(error))
-		return false
-	return apply_data(world, data)
-
-## Returns save metadata (name, path, modified_time) sorted newest first.
-static func list_saves() -> Array[Dictionary]:
-	var saves: Array[Dictionary] = []
-	var dir := DirAccess.open(SAVE_DIR)
-	if dir == null:
-		return saves
-	dir.list_dir_begin()
-	var file_name := dir.get_next()
-	while file_name != "":
-		if not dir.current_is_dir() and file_name.ends_with(".json"):
-			var path := SAVE_DIR.path_join(file_name)
-			saves.append({
-				"name": file_name.get_basename(),
-				"path": path,
-				"modified_time": FileAccess.get_modified_time(path),
-			})
-		file_name = dir.get_next()
-	dir.list_dir_end()
-	saves.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return a["modified_time"] > b["modified_time"])
-	return saves
 
 # ------------------------------------------------------------------
 # RoomWorld room states (keyed by room coordinates, no player data)
@@ -103,12 +21,12 @@ static func room_state_name(room_coordinates: Vector2i, size: Vector2i) -> Strin
 	return "room_%d_%d_%dx%d" % [room_coordinates.x, room_coordinates.y, size.x, size.y]
 
 static func room_state_path(room_coordinates: Vector2i, size: Vector2i) -> String:
-	return SAVE_DIR.path_join("%s.json" % room_state_name(room_coordinates, size))
+	return save_dir.path_join("%s.json" % room_state_name(room_coordinates, size))
 
 ## Pre-dimension filenames shared saves across different room sizes; kept
 ## only as a read fallback so existing saves are not orphaned.
 static func legacy_room_state_path(room_coordinates: Vector2i) -> String:
-	return SAVE_DIR.path_join("room_%d_%d.json" % [room_coordinates.x, room_coordinates.y])
+	return save_dir.path_join("room_%d_%d.json" % [room_coordinates.x, room_coordinates.y])
 
 static func room_state_candidates(room_coordinates: Vector2i, size: Vector2i) -> Array[String]:
 	var paths: Array[String] = []
@@ -121,10 +39,10 @@ static func room_state_candidates(room_coordinates: Vector2i, size: Vector2i) ->
 	return paths
 
 static func player_state_path() -> String:
-	return SAVE_DIR.path_join("player_state.json")
+	return save_dir.path_join("player_state.json")
 
 static func connections_path() -> String:
-	return SAVE_DIR.path_join("connections.json")
+	return save_dir.path_join("connections.json")
 
 ## Saves the RoomWorld's explicit room connection graph. Connections are
 ## world-layout data, stored separately from per-room contents.
@@ -133,7 +51,7 @@ static func save_connections(room_world: RoomWorld) -> Error:
 		push_error("RoomSaveSystem.save_connections requires a RoomWorld.")
 		return ERR_INVALID_PARAMETER
 	if not _ensure_save_dir():
-		push_error("RoomSaveSystem could not create save dir '%s'." % SAVE_DIR)
+		push_error("RoomSaveSystem could not create save dir '%s'." % save_dir)
 		return ERR_CANT_CREATE
 	var path := connections_path()
 	var file := FileAccess.open(path, FileAccess.WRITE)
@@ -181,7 +99,7 @@ static func save_room_world_room(room_world: RoomWorld, room: Room) -> Error:
 		push_error("RoomSaveSystem.save_room_world_room requires a RoomWorld and a Room with BlockLayer.")
 		return ERR_INVALID_PARAMETER
 	if not _ensure_save_dir():
-		push_error("RoomSaveSystem could not create save dir '%s'." % SAVE_DIR)
+		push_error("RoomSaveSystem could not create save dir '%s'." % save_dir)
 		return ERR_CANT_CREATE
 	var path := room_state_path(room.room_coordinates, room.size)
 	var file := FileAccess.open(path, FileAccess.WRITE)
@@ -195,35 +113,80 @@ static func save_room_world_room(room_world: RoomWorld, room: Room) -> Error:
 	return OK
 
 ## Loads a saved room state into a RoomWorld room. Returns false when no
-## save exists for the room's coordinates or the save is invalid.
+## save exists for the room's coordinates or the save is incompatible.
+## Incompatible saves are never applied and never deleted; they are
+## reported so a developer can audit/quarantine them.
 static func load_room_world_room(room_world: RoomWorld, room: Room) -> bool:
 	if room_world == null or room == null or room.block_layer == null:
 		push_error("RoomSaveSystem.load_room_world_room requires a RoomWorld and a Room with BlockLayer.")
 		return false
-	var candidates := room_state_candidates(room.room_coordinates, room.size)
-	if candidates.is_empty():
-		return false
-	var tile_layer := room.get_node_or_null(^"TileLayer") as TileLayer
-	var carpet_layer := room.get_node_or_null(^"CarpetLayer") as CarpetLayer
-	for path in candidates:
+	for path in room_state_candidates(room.room_coordinates, room.size):
 		var data := _read_save_file(path)
 		if data.is_empty():
 			continue
-		var size := _read_size(data.get("size"))
-		if size == Vector2i.ZERO or size != room.size:
-			push_warning("RoomSaveSystem: save '%s' size %s does not match room size %s; skipped." % [path, size, room.size])
+		var compatibility := check_room_compatibility(data, room)
+		if not compatibility["ok"]:
+			push_warning("RoomSaveSystem: save '%s' is incompatible with room %s (size %s, origin %s); skipped. Reasons: %s" % [
+				path, room.room_coordinates, room.size, room.cell_origin, ", ".join(compatibility["reasons"])])
 			continue
-		return _apply_data(
-			room, room.block_layer, tile_layer, carpet_layer, null,
-			room_world.grid, room_world.block_catalog, room_world.furniture_catalog,
-			room_world.carpet_catalog, room_world.tile_catalog, data)
+		return apply_room_state(room_world, room, data)
 	return false
+
+## Checks whether a serialized room state may be applied to the given
+## room. A save is compatible when its size matches and every identity
+## field it records (room_coordinates, global_origin) matches the room's
+## registered values. Saves written before identity fields existed are
+## accepted on size+origin evidence alone.
+## Returns {"ok": bool, "reasons": Array[String]}.
+static func check_room_compatibility(data: Dictionary, room: Room) -> Dictionary:
+	var reasons: Array[String] = []
+	if room == null:
+		reasons.append("no target room")
+		return {"ok": false, "reasons": reasons}
+	var size := _read_size(data.get("size"))
+	if size == Vector2i.ZERO:
+		reasons.append("missing or invalid size")
+	elif size != room.size:
+		reasons.append("size %s does not match room size %s" % [size, room.size])
+	var saved_coordinates = _read_vec2i(data.get("room_coordinates"))
+	if saved_coordinates != null and saved_coordinates != room.room_coordinates:
+		reasons.append("room_coordinates %s does not match room id %s" % [saved_coordinates, room.room_coordinates])
+	var saved_origin = _read_vec2i(data.get("global_origin"))
+	if saved_origin != null and saved_origin != room.cell_origin:
+		reasons.append("global_origin %s does not match room origin %s" % [saved_origin, room.cell_origin])
+	return {"ok": reasons.is_empty(), "reasons": reasons}
+
+## Serializes a room's contents (blocks, furniture, carpets, tiles) to a
+## Dictionary without touching disk. The player's position is included
+## when a player is passed.
+static func collect_room_state(room: Room, block_layer: BlockLayer, player: Player = null) -> Dictionary:
+	var spawn := Vector2i(room.size.x >> 1, room.size.y >> 1)
+	return _collect_room_data(room, block_layer, player, "", "", spawn)
+
+## Applies a room state Dictionary (as produced by collect_room_state or
+## read from a save file) to a RoomWorld room. Returns false when the data
+## is invalid or its size does not match the room's registered size.
+static func apply_room_state(room_world: RoomWorld, room: Room, data: Dictionary, player: Player = null) -> bool:
+	if room_world == null or room == null or room.block_layer == null:
+		push_error("RoomSaveSystem.apply_room_state requires a RoomWorld and a Room with BlockLayer.")
+		return false
+	var compatibility := check_room_compatibility(data, room)
+	if not compatibility["ok"]:
+		push_warning("RoomSaveSystem: room state is incompatible with room %s (size %s, origin %s); skipped. Reasons: %s" % [
+			room.room_coordinates, room.size, room.cell_origin, ", ".join(compatibility["reasons"])])
+		return false
+	var tile_layer := room.get_node_or_null(^"TileLayer") as TileLayer
+	var carpet_layer := room.get_node_or_null(^"CarpetLayer") as CarpetLayer
+	return _apply_data(
+		room, room.block_layer, tile_layer, carpet_layer, player,
+		room_world.grid, room_world.block_catalog, room_world.furniture_catalog,
+		room_world.carpet_catalog, room_world.tile_catalog, data)
 
 ## Persists which room the player is in and where they stand, so the next
 ## session can restore the exact position.
 static func save_player_state(room_coordinates: Vector2i, position: Vector2i, elevation: float) -> Error:
 	if not _ensure_save_dir():
-		push_error("RoomSaveSystem could not create save dir '%s'." % SAVE_DIR)
+		push_error("RoomSaveSystem could not create save dir '%s'." % save_dir)
 		return ERR_CANT_CREATE
 	var path := player_state_path()
 	var file := FileAccess.open(path, FileAccess.WRITE)
@@ -289,17 +252,6 @@ static func _read_save_file(path: String) -> Dictionary:
 # Data collection
 # ------------------------------------------------------------------
 
-static func collect_room_data(world: World) -> Dictionary:
-	var room_def := world.room_definition
-	var spawn := Vector2i(1, 1)
-	var room_id := ""
-	var display_name := ""
-	if room_def != null:
-		room_id = str(room_def.room_id)
-		display_name = room_def.display_name
-		spawn = room_def.spawn_position
-	return _collect_room_data(world.room, world.block_layer, world.player, room_id, display_name, spawn)
-
 static func _collect_room_data(room: Room, block_layer: BlockLayer, player: Player, room_id: String, display_name: String, spawn: Vector2i) -> Dictionary:
 	var block_placements: Array = []
 	var furniture_placements: Array = []
@@ -323,6 +275,7 @@ static func _collect_room_data(room: Room, block_layer: BlockLayer, player: Play
 		"version": VERSION,
 		"room_id": room_id,
 		"display_name": display_name,
+		"room_coordinates": [room.room_coordinates.x, room.room_coordinates.y],
 		"size": [room.size.x, room.size.y],
 		"global_origin": [room.cell_origin.x, room.cell_origin.y],
 		"grid_resource": room.grid.resource_path if room.grid != null else "",
@@ -384,26 +337,6 @@ static func _collect_tiles(room: Room) -> Array:
 # ------------------------------------------------------------------
 # Loading / reconstruction
 # ------------------------------------------------------------------
-
-static func resolve_save_path(world: World, room_name := "") -> String:
-	var name := room_name
-	if name.is_empty():
-		name = _room_name(world)
-	if not name.is_empty():
-		var exact := save_path(name)
-		if FileAccess.file_exists(exact):
-			return exact
-	var saves := list_saves()
-	return saves[0]["path"] if not saves.is_empty() else ""
-
-static func apply_data(world: World, data: Dictionary) -> bool:
-	var definition_grid: IsometricGrid = null
-	if world.room_definition != null:
-		definition_grid = world.room_definition.grid
-	return _apply_data(
-		world.room, world.block_layer, world.tile_layer, world.carpet_layer, world.player,
-		definition_grid, world.block_catalog, world.furniture_catalog, world.carpet_catalog, world.tile_catalog,
-		data)
 
 static func _apply_data(
 	room: Room,
@@ -683,15 +616,8 @@ static func _validate_tiles(tiles: Variant, size: Vector2i, errors: Array[String
 # Conversion helpers
 # ------------------------------------------------------------------
 
-static func _room_name(world: World) -> String:
-	if world.room_definition != null:
-		var id := str(world.room_definition.room_id)
-		if not id.is_empty():
-			return id
-	return DEFAULT_ROOM_NAME
-
 static func _ensure_save_dir() -> bool:
-	return DirAccess.make_dir_recursive_absolute(SAVE_DIR) == OK
+	return DirAccess.make_dir_recursive_absolute(save_dir) == OK
 
 static func _is_finite_number(value: Variant) -> bool:
 	if not (value is int or value is float):
@@ -730,3 +656,111 @@ static func _read_size(value: Variant) -> Vector2i:
 
 static func _in_bounds(cell: Vector2i, size: Vector2i) -> bool:
 	return cell.x >= 0 and cell.y >= 0 and cell.x < size.x and cell.y < size.y
+
+# ------------------------------------------------------------------
+# Save auditing & quarantine (developer tools — never run automatically)
+# ------------------------------------------------------------------
+
+## Audits every room_*.json file in the save directory against the
+## RoomWorld's registered layout. Returns one Dictionary per file:
+## {"path", "status", "reasons"} where status is "compatible",
+## "incompatible" (a matching room exists but the save fails the
+## compatibility check), "orphan" (no registered room matches the
+## saved coordinates/size), or "unreadable".
+static func audit_room_saves(room_world: RoomWorld) -> Array[Dictionary]:
+	var report: Array[Dictionary] = []
+	if room_world == null:
+		push_error("RoomSaveSystem.audit_room_saves requires a RoomWorld.")
+		return report
+	var dir := DirAccess.open(save_dir)
+	if dir == null:
+		return report
+	for file_name in dir.get_files():
+		if not file_name.begins_with("room_") or not file_name.ends_with(".json"):
+			continue
+		var path := save_dir.path_join(file_name)
+		var entry := {"path": path, "status": "unreadable", "reasons": []}
+		var data := _read_save_file(path)
+		if data.is_empty():
+			report.append(entry)
+			continue
+		var coordinates = _read_vec2i(data.get("room_coordinates"))
+		var size := _read_size(data.get("size"))
+		var room: Room = null
+		if coordinates != null:
+			room = room_world.get_room(coordinates)
+		if room == null:
+			# Saves predating room_coordinates: fall back to the filename,
+			# which encodes coordinates and (for current saves) dimensions.
+			var parsed := _parse_room_state_filename(file_name)
+			if parsed.is_empty():
+				entry["status"] = "orphan"
+				entry["reasons"] = ["cannot determine room identity"]
+				report.append(entry)
+				continue
+			room = room_world.get_room(parsed["coordinates"])
+			if room != null and parsed.has("size") and room.size != parsed["size"]:
+				room = null
+		if room == null:
+			entry["status"] = "orphan"
+			entry["reasons"] = ["no registered room matches saved coordinates/size"]
+			report.append(entry)
+			continue
+		var compatibility := check_room_compatibility(data, room)
+		entry["status"] = "compatible" if compatibility["ok"] else "incompatible"
+		entry["reasons"] = compatibility["reasons"]
+		report.append(entry)
+	return report
+
+## Moves a save file into save_dir/_quarantine/, preserving the data for
+## manual recovery. Explicit developer action only — never called
+## automatically. Returns OK or an error.
+static func quarantine_room_save(path: String) -> Error:
+	if not FileAccess.file_exists(path):
+		return ERR_FILE_NOT_FOUND
+	var quarantine_dir := save_dir.path_join("_quarantine")
+	if DirAccess.make_dir_recursive_absolute(quarantine_dir) != OK:
+		return ERR_CANT_CREATE
+	var target := quarantine_dir.path_join(path.get_file())
+	var suffix := 1
+	while FileAccess.file_exists(target):
+		target = quarantine_dir.path_join("%s.%d" % [path.get_file(), suffix])
+		suffix += 1
+	return DirAccess.rename_absolute(path, target)
+
+## Quarantines every save file reported as "incompatible" or "orphan" by
+## audit_room_saves(). Returns the number of files moved. Explicit
+## developer action only.
+static func quarantine_incompatible_saves(room_world: RoomWorld) -> int:
+	var moved := 0
+	for entry in audit_room_saves(room_world):
+		if entry["status"] == "compatible" or entry["status"] == "unreadable":
+			continue
+		if quarantine_room_save(entry["path"]) == OK:
+			moved += 1
+		else:
+			push_error("RoomSaveSystem could not quarantine '%s'." % entry["path"])
+	return moved
+
+## Parses "room_X_Y[_WxH].json" filenames back into coordinates and size.
+## Returns {} when the name does not match the pattern.
+static func _parse_room_state_filename(file_name: String) -> Dictionary:
+	var stem := file_name.get_basename()
+	var parts := stem.split("_")
+	# room, x, y[, w, h]
+	if parts.size() < 3 or parts[0] != "room":
+		return {}
+	var coordinates = _read_vec2i([parts[1], parts[2]])
+	if coordinates == null:
+		return {}
+	var size := Vector2i.ZERO
+	if parts.size() == 4 and parts[3].contains("x"):
+		# "room_X_Y_WxH" — dimensions are a single "WxH" token.
+		var dims := parts[3].split("x")
+		if dims.size() == 2:
+			size = _read_size([dims[0], dims[1]])
+	elif parts.size() >= 5:
+		size = _read_size([parts[3], parts[4]])
+	if size == Vector2i.ZERO:
+		return {"coordinates": coordinates}  # legacy name carries no size
+	return {"coordinates": coordinates, "size": size}

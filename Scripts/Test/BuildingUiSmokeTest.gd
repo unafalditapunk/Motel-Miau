@@ -2,14 +2,14 @@ extends SceneTree
 
 var _frames := 0
 var _failures: Array[String] = []
-var _world: World
+var _world: WorldBootstrap
 var _toolbar: BuildingToolbar
 var _catalog: CatalogPanel
 var _controller: BlockPlacementController
 var _selector: BuildingSelector
 
 func _initialize() -> void:
-	_world = load("res://Scenes/World/World.tscn").instantiate()
+	_world = load("res://Scenes/World/WorldBootstrap.tscn").instantiate()
 	root.add_child(_world)
 	_toolbar = _world.get_node_or_null("BuildingToolbar") as BuildingToolbar
 	_catalog = _world.get_node_or_null("CatalogPanel") as CatalogPanel
@@ -35,11 +35,17 @@ func _button_texts() -> Array[String]:
 		texts.append((button as Button).text)
 	return texts
 
-func _press_key(keycode: Key) -> void:
+func _key(keycode: Key) -> InputEventKey:
 	var event := InputEventKey.new()
 	event.keycode = keycode
+	event.physical_keycode = keycode
 	event.pressed = true
-	_catalog._unhandled_input(event)
+	return event
+
+func _toggle_catalog() -> void:
+	# Q toggles the catalog while Build Mode is active (CatalogPanel
+	# handles the key itself, gated on construction mode).
+	_catalog._unhandled_input(_key(KEY_Q))
 
 func _run_checks() -> void:
 	_expect(_toolbar != null, "BuildingToolbar node missing from World")
@@ -54,15 +60,15 @@ func _run_checks() -> void:
 		_expect(texts.has(expected), "toolbar missing button '%s' (got %s)" % [expected, texts])
 
 	_expect(not _catalog.is_open(), "catalog should start closed")
-	_press_key(KEY_Q)
+	_toggle_catalog()
 	_expect(not _catalog.is_open(), "Q opened the catalog in normal mode")
 
 	_expect(not _toolbar._strip.visible, "toolbar should be hidden in normal mode")
 	_toolbar._on_build_pressed()
 	_expect(_toolbar._strip.visible, "toolbar should be visible in construction mode")
-	_press_key(KEY_Q)
+	_toggle_catalog()
 	_expect(_catalog.is_open(), "Q did not open the catalog in construction mode")
-	_press_key(KEY_Q)
+	_toggle_catalog()
 	_expect(not _catalog.is_open(), "Q did not close the catalog")
 
 	_catalog.open()

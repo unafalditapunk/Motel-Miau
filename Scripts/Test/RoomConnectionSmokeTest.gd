@@ -26,6 +26,7 @@ var _frames := 0
 var _failures: Array[String] = []
 
 func _initialize() -> void:
+	RoomSaveSystem.save_dir = "user://smoke_saves/room_connection"
 	_grid = load(GRID_PATH) as IsometricGrid
 	_room_world = RoomWorld.new()
 	_room_world.name = "RoomWorld"
@@ -112,6 +113,8 @@ func _run_checks() -> void:
 	_test_interactive_transition()
 	_test_unconnected_boundary()
 	_test_connection_save_load()
+	_test_exit_direction()
+	_test_connection_markers()
 
 func _test_registration() -> void:
 	var good := _make_connection(&"door_a_b", Vector2i(0, 0), Vector2i(1, 0), [Vector2i(15, 7), Vector2i(15, 8)], [Vector2i(0, 7), Vector2i(0, 8)])
@@ -247,6 +250,79 @@ func _test_connection_save_load() -> void:
 	_expect(_room_world.unregister_connection(&"portal_a_d"), "unregister_connection failed")
 	_expect(_room_world.get_connection(&"portal_a_d") == null, "unregistered connection still present")
 	_expect(_room_world.register_connection(_make_connection(&"portal_a_d", Vector2i(0, 0), Vector2i(3, 3), [Vector2i(8, 8)], [Vector2i(2, 2)], true, false, RoomConnection.ConnectionType.PORTAL)), "re-registration after unregister failed")
+
+func _test_exit_direction() -> void:
+	var room_a := _room_world.get_room(Vector2i(0, 0))
+	# Direction-aware lookup resolves the covered cell to the connection
+	# whose destination actually contains the neighboring world cell.
+	var east := _room_world.find_room_exit(room_a, Vector2i(15, 7), Vector2i(1, 0))
+	_expect(not east.is_empty() and east["room_id"] == Vector2i(1, 0), "directional exit picked wrong room: %s" % str(east.get("room_id")))
+	# A lone covering connection always wins, even for non-adjacent
+	# destinations (the override door proves this in the transition test).
+	var south := _room_world.find_room_exit(room_a, Vector2i(15, 7), Vector2i(0, 1))
+	_expect(not south.is_empty() and south["room_id"] == Vector2i(1, 0), "single covering connection was vetoed by direction")
+	# Ambiguous coverage resolves deterministically by connection id.
+	var amb := _make_connection(&"zz_amb_d", Vector2i(0, 0), Vector2i(3, 3), [Vector2i(15, 7)], [Vector2i(0, 0)], false, true)
+	_expect(_room_world.register_connection(amb), "ambiguous test connection rejected")
+	var first := _room_world.find_room_exit(room_a, Vector2i(15, 7))
+	var second := _room_world.find_room_exit(room_a, Vector2i(15, 7))
+	_expect(not first.is_empty(), "ambiguous exit lookup returned nothing")
+	if not first.is_empty() and not second.is_empty():
+		_expect(first["connection"] == second["connection"], "ambiguous exit is not deterministic")
+		_expect(first["room_id"] == Vector2i(1, 0), "ambiguous exit picked %s, expected door_a_b (lowest id)" % first["room_id"])
+	# Direction disambiguates the same cell toward the real neighbor.
+	var directed := _room_world.find_room_exit(room_a, Vector2i(15, 7), Vector2i(1, 0))
+	_expect(not directed.is_empty() and directed["room_id"] == Vector2i(1, 0), "direction failed to disambiguate")
+	# Ambiguous coverage with a direction no destination satisfies is
+	# refused instead of guessing a wrong room.
+	var nowhere := _room_world.find_room_exit(room_a, Vector2i(15, 7), Vector2i(0, 1))
+	_expect(nowhere.is_empty(), "ambiguous exit into empty space returned a connection: %s" % str(nowhere.get("room_id")))
+	_room_world.unregister_connection(&"zz_amb_d")
+
+func _live_children(node: Node) -> Array:
+	var live: Array = []
+	for child in node.get_children():
+		if not child.is_queued_for_deletion():
+			live.append(child)
+	return live
+
+func _test_connection_markers() -> void:
+	var portal := _room_world.get_connection(&"portal_a_d")
+	_expect(portal != null, "portal connection missing for marker test")
+	if portal == null:
+		return
+	var tex := load("res://Assets/Sprites/Carpet/flower_carpet_iso.png") as Texture2D
+	_expect(tex != null, "marker texture failed to load")
+	if tex == null:
+		return
+	portal.marker_texture = tex
+	_room_world.visuals.refresh_connection_markers()
+	var room_a := _room_world.get_room(Vector2i(0, 0))
+	var holder := room_a.get_node_or_null(^"ConnectionMarkers") as Node2D
+	_expect(holder != null, "ConnectionMarkers node missing in room A")
+	if holder != null:
+		var sprites := _live_children(holder).filter(func(c): return c is Sprite2D)
+		_expect(sprites.size() == 1, "expected 1 marker sprite in room A, got %d" % sprites.size())
+		if sprites.size() == 1:
+			var sprite := sprites[0] as Sprite2D
+			_expect(sprite.texture == tex, "marker sprite texture mismatch")
+			_expect(sprite.texture_filter == CanvasItem.TEXTURE_FILTER_NEAREST, "marker not nearest-filtered")
+	# Unmarked door connections must not produce sprites.
+	var room_b := _room_world.get_room(Vector2i(1, 0))
+	var holder_b := room_b.get_node_or_null(^"ConnectionMarkers") as Node2D
+	if holder_b != null:
+		_expect(_live_children(holder_b).is_empty(), "unmarked door produced marker sprites")
+	# Marker texture survives connection serialization.
+	var serialized := _room_world.connections.serialize_all()
+	var portal_entry: Dictionary = {}
+	for entry in serialized:
+		if str(entry.get("id", "")) == "portal_a_d":
+			portal_entry = entry
+	_expect(portal_entry.get("marker", "") == "res://Assets/Sprites/Carpet/flower_carpet_iso.png", "marker path not serialized: %s" % str(portal_entry.get("marker")))
+	_room_world.connections.clear()
+	_room_world.connections.deserialize_all(serialized)
+	var restored := _room_world.get_connection(&"portal_a_d")
+	_expect(restored != null and restored.marker_texture == tex, "marker texture lost in serialization round-trip")
 
 func _report() -> void:
 	if _failures.is_empty():

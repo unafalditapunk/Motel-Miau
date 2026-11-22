@@ -108,6 +108,10 @@ func _build_text() -> String:
 		lines.append("Connections: %d from room  Visible rooms: %d  De-emphasized: %d" % [linked.size(), visible_rooms.size(), de_emphasized])
 		lines.append("Linked rooms: %s" % linked_text)
 	lines.append("World pos:   (%.2f, %.2f)" % [world_pos.x, world_pos.y])
+	lines.append(_floor_line())
+	var creation := _creation_line()
+	if not creation.is_empty():
+		lines.append(creation)
 	lines.append("Cell anchor: (%.2f, %.2f)" % [cell_screen.x, cell_screen.y])
 	lines.append("Facing:      %s   Buffered: %s" % [str(player.facing_direction), str(player._buffered_direction)])
 	var next := player.next_move_target()
@@ -138,3 +142,32 @@ func _build_text() -> String:
 
 func _room_world() -> RoomWorld:
 	return get_tree().get_first_node_in_group(&"room_worlds") as RoomWorld
+
+func _floor_manager() -> FloorManager:
+	var world := get_tree().get_first_node_in_group(&"world") as WorldBootstrap
+	return world.floor_manager if world != null else null
+
+func _floor_line() -> String:
+	var manager := _floor_manager()
+	if manager == null or manager.active_floor == null:
+		return "Floor:       <none> (legacy world)"
+	var floor_def := manager.active_floor
+	var dirty := "dirty" if manager.is_floor_dirty() else "clean"
+	var saved := "saved" if manager.has_floor_save(floor_def.floor_id) else "unsaved"
+	return "Floor:       %s [%s]  rooms %d  %s  %s" % [
+		floor_def.display_name, floor_def.floor_id, floor_def.rooms.size(), dirty, saved]
+
+## Creation Mode line: mode, view, cursor global cell, camera zoom.
+## Empty when the editor is inactive so normal debug output is unchanged.
+func _creation_line() -> String:
+	var editor := _floor_editor()
+	if editor == null or not editor.active:
+		return ""
+	var view := "grid" if editor.view_mode == FloorEditor.ViewMode.GRID else "rooms"
+	var text := "Mode:        CREATION (%s view)" % view
+	if editor.cursor_cell_valid:
+		text += "  cursor (%d, %d)" % [editor.cursor_cell.x, editor.cursor_cell.y]
+	return text
+
+func _floor_editor() -> FloorEditor:
+	return get_tree().get_first_node_in_group(&"floor_editor") as FloorEditor

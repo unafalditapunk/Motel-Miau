@@ -26,6 +26,12 @@ var cells := {}
 var hovered_cell: Vector2i = Vector2i(-1, -1)
 var hovered_elevation := 0.0
 var block_layer: BlockLayer
+## Per-room visibility options (FloorRoomSpec / Creation Mode panel).
+## RoomVisuals reads them live: show_from_outside=false keeps the room
+## hidden until it becomes primary; show_outside=false conceals the
+## block layers of edge-adjacent rooms while this room is primary.
+var show_from_outside := true
+var show_outside := true
 var deemphasis_material: Material = null
 var is_sliding := false
 var _deemphasis_nodes: Array[CanvasItem] = []
@@ -182,6 +188,35 @@ func get_occupant(coordinates: Vector2i) -> Node:
 	if cell == null:
 		return null
 	return cell.occupant
+
+## Counts of player-placed contents, using the same criteria as
+## RoomSaveSystem: blocks+furniture in the block layer, anchored
+## carpets, and tile overrides (non-default tile or non-zero tile
+## elevation). Default floor tiles do not count.
+func placed_content_counts() -> Dictionary:
+	var blocks := 0
+	if block_layer != null:
+		blocks = block_layer.blocks.size()
+	var carpets := 0
+	var tiles := 0
+	var default_tile_id := StringName()
+	if default_tile != null:
+		default_tile_id = default_tile.object_id
+	for cell: RoomCell in cells.values():
+		if cell.carpet != null and cell.carpet_anchor == cell.coordinates:
+			carpets += 1
+		var tile_id := cell.tile.object_id if cell.tile != null else StringName()
+		if tile_id != default_tile_id or not is_equal_approx(cell.tile_elevation, 0.0):
+			tiles += 1
+	return {"blocks": blocks, "carpets": carpets, "tiles": tiles}
+
+## True when the room holds no player-placed contents — the only
+## state a room deletion is allowed to discard.
+func has_placed_contents() -> bool:
+	for count in placed_content_counts().values():
+		if int(count) > 0:
+			return true
+	return false
 
 func cell_to_screen(coordinates: Vector2i) -> Vector2:
 	if grid == null:

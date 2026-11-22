@@ -26,7 +26,7 @@ func _process(_delta: float) -> void:
 	var definition := _controller.get_active_definition()
 	var room := _controller.room
 	var layer := _controller.block_layer
-	if not _controller.construction_mode or definition == null or room == null or room.grid == null or layer == null:
+	if not _controller.construction_mode or FloorEditor.any_active(get_tree()) or definition == null or room == null or room.grid == null or layer == null:
 		visible = false
 		return
 	var world_mouse := get_viewport().get_canvas_transform().affine_inverse() * get_viewport().get_mouse_position()

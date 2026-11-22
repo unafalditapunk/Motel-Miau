@@ -1,9 +1,14 @@
-[gd_resource type="Resource" script_class="BlockCatalog" load_steps=4 format=3]
+[gd_resource type="Resource" script_class="BlockCatalog" load_steps=9 format=3]
 
 [ext_resource type="Script" path="res://Scripts/Objects/BlockCatalog.gd" id="1"]
 [ext_resource type="Resource" path="res://Resources/Blocks/StandardBlock.tres" id="2"]
 [ext_resource type="Resource" path="res://Resources/Blocks/CrateBlock.tres" id="3"]
+[ext_resource type="Resource" path="res://Resources/Blocks/BrickBlock.tres" id="4"]
+[ext_resource type="Resource" path="res://Resources/Blocks/PotPlantBlock.tres" id="5"]
+[ext_resource type="Resource" path="res://Resources/Blocks/WoodLogBlock.tres" id="6"]
+[ext_resource type="Resource" path="res://Resources/Blocks/WhiteTilesBlock.tres" id="7"]
+[ext_resource type="Resource" path="res://Resources/Blocks/GreyConcreteBlock.tres" id="8"]
 
 [resource]
 script = ExtResource("1")
-definitions = Array[Resource]([ExtResource("2"), ExtResource("3")])
+definitions = Array[Resource]([ExtResource("2"), ExtResource("3"), ExtResource("4"), ExtResource("5"), ExtResource("6"), ExtResource("7"), ExtResource("8")])

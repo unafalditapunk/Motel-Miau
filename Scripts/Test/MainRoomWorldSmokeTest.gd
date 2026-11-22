@@ -2,7 +2,7 @@ extends SceneTree
 
 var _scene: Node
 var _room_world: RoomWorld
-var _world: World
+var _world: WorldBootstrap
 var _player: Player
 var _camera: WorldCamera
 var _frames := 0
@@ -10,6 +10,12 @@ var _phase := 0
 var _failures: Array[String] = []
 
 func _initialize() -> void:
+	RoomSaveSystem.save_dir = "user://smoke_saves/main_room_world"
+	# The main world boots into the Motel floor; keep its floor saves in
+	# a scratch root so the test never touches real user://floors data.
+	FloorSaveSystem.save_root = "user://smoke_saves/floor_main_room_world"
+	_remove_dir_contents(RoomSaveSystem.save_dir)
+	_remove_dir_contents(FloorSaveSystem.save_root)
 	_scene = load("res://Scenes/Main/Main.tscn").instantiate()
 	root.add_child(_scene)
 
@@ -18,10 +24,10 @@ func _process(_delta: float) -> bool:
 	if _phase == 0:
 		if _frames < 8:
 			return false
-		_room_world = _scene.get_node("RoomWorld") as RoomWorld
-		_world = _scene.get_node("World") as World
+		_room_world = _scene.get_node("WorldBootstrap/RoomWorld") as RoomWorld
+		_world = _scene.get_node("WorldBootstrap") as WorldBootstrap
 		if _room_world == null or _world == null:
-			_failures.append("Main scene is missing RoomWorld or World")
+			_failures.append("Main scene is missing RoomWorld or WorldBootstrap")
 			_report()
 			quit()
 			return true
@@ -48,6 +54,16 @@ func _process(_delta: float) -> bool:
 func _expect(condition: bool, message: String) -> void:
 	if not condition:
 		_failures.append(message)
+
+func _remove_dir_contents(path: String) -> void:
+	var dir := DirAccess.open(path)
+	if dir == null:
+		return
+	for file_name in dir.get_files():
+		dir.remove(file_name)
+	for sub in dir.get_directories():
+		_remove_dir_contents(path.path_join(sub))
+		DirAccess.remove_absolute(path.path_join(sub))
 
 const RING_SIZE := Vector2i(4, 4)
 const RING_IDS: Array[Vector2i] = [
@@ -143,6 +159,13 @@ func _test_transition() -> void:
 	_expect(far_corner != null and not far_corner.visible, "room outside the connection neighborhood is still visible")
 	_expect(center != null and center.visible, "connected center room hidden while standing in ring room")
 
+## Floor-scoped room save path: with an active floor the effective save
+## directory is user://floors/<id>/ (redirected to scratch here), not
+## the legacy RoomSaveSystem.save_dir.
+func _room_state_file(room: Room) -> String:
+	return _room_world.effective_save_directory().path_join(
+		"%s.json" % RoomSaveSystem.room_state_name(room.room_coordinates, room.size))
+
 func _test_room_saves() -> void:
 	if _room_world == null or _player == null:
 		return
@@ -172,16 +195,33 @@ func _test_room_saves() -> void:
 	var expected := room.block_layer.blocks.size()
 	var error := _room_world.save_room_state(room)
 	_expect(error == OK, "save_room_state failed with error %d" % error)
-	_expect(FileAccess.file_exists(RoomSaveSystem.room_state_path(room.room_coordinates, room.size)), "room state file missing after save")
+	_expect(FileAccess.file_exists(_room_state_file(room)), "room state file missing after save")
 	room.block_layer.clear_blocks()
 	_room_world.reset_room_state(room)
 	_expect(_room_world.ensure_room_loaded(room), "ensure_room_loaded returned false for saved room")
 	_expect(room.block_layer.blocks.size() == expected, "room state load restored %d blocks, expected %d" % [room.block_layer.blocks.size(), expected])
+	# Floor-level round-trip: commit through FloorManager (manifest
+	# included), re-materialize the whole floor, and confirm the placed
+	# block survived — this is the authoritative save/load path.
+	_expect(_world.floor_manager.save_active_floor(), "save_active_floor failed")
+	_expect(_world.floor_manager.load_floor(&"motel"), "motel floor reload failed")
+	var reloaded := _room_world.get_room(room.room_coordinates)
+	_expect(reloaded != null and reloaded.block_layer != null \
+		and reloaded.block_layer.blocks.size() == expected,
+		"floor reload lost blocks: %s" % (reloaded.block_layer.blocks.size() if reloaded != null and reloaded.block_layer != null else -1))
+	room = reloaded
+	if room == null or room.block_layer == null:
+		return
 	for block in room.block_layer.get_blocks_at(free_cell):
 		room.block_layer.remove_block(block)
 	_room_world.save_room_state(room)
 	_room_world.save_all_rooms()
+	# Player state lives in the floor-scoped directory; point the static
+	# save_dir at it just for this read, like RoomWorld._with_save_dir.
+	var saved_dir := RoomSaveSystem.save_dir
+	RoomSaveSystem.save_dir = _room_world.effective_save_directory()
 	var state := RoomSaveSystem.load_player_state()
+	RoomSaveSystem.save_dir = saved_dir
 	_expect(not state.is_empty(), "player state missing after save_all_rooms")
 	if not state.is_empty():
 		_expect(state["room_coordinates"] == room.room_coordinates, "player state room mismatch")
@@ -195,7 +235,8 @@ func _test_camera_settled() -> void:
 	var controller := _world.placement_controller
 	_expect(controller != null and controller.room == _player.room, "placement controller did not follow the player room")
 	_expect(controller != null and controller.block_layer == _player.block_layer, "placement controller block layer mismatch")
-	_expect(FileAccess.file_exists(RoomSaveSystem.room_state_path(Vector2i.ZERO, _world.room.size)), "leaving the center room did not write its save")
+	var center_room := _room_world.get_room(Vector2i.ZERO)
+	_expect(center_room != null and FileAccess.file_exists(_room_state_file(center_room)), "leaving the center room did not write its save")
 
 func _report() -> void:
 	if _failures.is_empty():

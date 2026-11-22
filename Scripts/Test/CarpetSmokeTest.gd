@@ -2,13 +2,13 @@ extends SceneTree
 
 var _frames := 0
 var _failures: Array[String] = []
-var _world: World
+var _world: WorldBootstrap
 var _room: Room
 var _controller: BlockPlacementController
 var _carpet: CarpetDefinition
 
 func _initialize() -> void:
-	_world = load("res://Scenes/World/World.tscn").instantiate()
+	_world = load("res://Scenes/World/WorldBootstrap.tscn").instantiate()
 	root.add_child(_world)
 
 func _process(_delta: float) -> bool:
@@ -44,9 +44,6 @@ func _find_cell() -> Vector2i:
 			return cell
 	return Vector2i(-1, -1)
 
-func _carpet_depth(cell: Vector2i, elevation: float) -> int:
-	return (cell.x + cell.y) * 128 + cell.y * 16 + int(round(elevation))
-
 func _carpet_sprite(cell: Vector2i) -> Sprite2D:
 	_world.carpet_layer._resync_carpets()
 	return _world.carpet_layer._carpets.get(cell) as Sprite2D
@@ -68,9 +65,9 @@ func _check_carpet_surface(cell: Vector2i, surface: float, elevated: bool, label
 	_expect(sprite.position.is_equal_approx(expected_position),
 		"%s: carpet sprite not positioned at surface height" % label)
 	var front_cell := cell + footprint - Vector2i.ONE
-	var expected_z := _carpet_depth(front_cell, surface)
+	var expected_z := _world.carpet_layer._depth_for_cell(front_cell, surface)
 	if not elevated:
-		expected_z += CarpetLayer.DEPTH_OFFSET
+		expected_z += -54 if _world.carpet_layer.compact_depth else CarpetLayer.DEPTH_OFFSET
 	_expect(sprite.z_index == expected_z,
 		"%s: carpet z_index %d != expected %d" % [label, sprite.z_index, expected_z])
 
@@ -150,7 +147,7 @@ func _run_checks() -> void:
 			"hover pick elevation %.2f != stack surface %.2f" % [float(stack_pick["elevation"]), stack_surface])
 
 	# Save round-trip preserves carpet elevation.
-	var data := RoomSaveSystem.collect_room_data(_world)
+	var data := RoomSaveSystem.collect_room_state(_room, _world.block_layer, _world.player)
 	var validation := RoomSaveSystem.validate_data(data)
 	_expect(validation["ok"], "carpet room data failed validation: %s" % str(validation["errors"]))
 	var carpet_entries: Array = data.get("carpet_placements", [])
@@ -164,7 +161,7 @@ func _run_checks() -> void:
 	if stack_cell != Vector2i(-1, -1):
 		_expect(is_equal_approx(float(elevations.get(stack_cell, -1.0)), stack_surface),
 			"saved carpet elevation %.2f != stack surface %.2f" % [float(elevations.get(stack_cell, -1.0)), stack_surface])
-	_expect(RoomSaveSystem.apply_data(_world, data), "apply_data failed carpet round-trip")
+	_expect(RoomSaveSystem.apply_room_state(_world.room_world, _room, data, _world.player), "apply_room_state failed carpet round-trip")
 	if single_cell != Vector2i(-1, -1):
 		var restored_single := _room.get_cell(single_cell)
 		_expect(restored_single != null and restored_single.carpet == _carpet, "apply_data did not restore single-block carpet")

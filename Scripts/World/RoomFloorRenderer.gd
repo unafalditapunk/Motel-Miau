@@ -1,7 +1,36 @@
 class_name RoomFloorRenderer
 extends Node2D
 
-var room: Room
+var room: Room:
+	set(value):
+		room = value
+		refresh_depth()
+
+func _ready() -> void:
+	refresh_depth()
+
+## The floor is one flat draw pass, so it needs a single z_index below
+## every cell's computed depth. Cell depths are recentered by
+## grid.depth_cell_center and can be negative; take the minimum across
+## both depth formulas (compact and legacy) plus a margin.
+func refresh_depth() -> void:
+	if room == null or room.grid == null:
+		z_index = -4096
+		return
+	var min_depth := 0
+	var first := true
+	for coordinates in room.cells:
+		var world_cell := room.grid.depth_cell(room.world_cell_coordinates(coordinates))
+		var compact := (world_cell.x + world_cell.y) * 48 + world_cell.y * 6
+		var wide := (world_cell.x + world_cell.y) * 128 + world_cell.y * 16
+		var depth := mini(compact, wide)
+		if first or depth < min_depth:
+			min_depth = depth
+			first = false
+	# CanvasItem z_index is clamped to +/-4096; content depths are kept in
+	# that range by depth_cell_center, so the floor just needs the lowest
+	# legal value relative to its own room's cells.
+	z_index = clampi(min_depth - 1024, -4096, 4096)
 
 func _draw() -> void:
 	if room == null or room.grid == null:

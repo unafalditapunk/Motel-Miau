@@ -29,6 +29,7 @@ var _frames := 0
 var _failures: Array[String] = []
 
 func _initialize() -> void:
+	RoomSaveSystem.save_dir = "user://smoke_saves/room_layout"
 	_grid = load(GRID_PATH) as IsometricGrid
 	_room_world = RoomWorld.new()
 	_room_world.name = "RoomWorld"

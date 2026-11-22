@@ -3,7 +3,6 @@ extends Node2D
 
 const DEFAULT_ROOM_SCENE := preload("res://Scenes/World/Room.tscn")
 const ROOM_LABEL_SCRIPT := preload("res://Scripts/World/RoomLabel.gd")
-const NEIGHBOR_DEEMPHASIS_SHADER := preload("res://Shaders/NeighborDeemphasis.gdshader")
 
 @export var grid: IsometricGrid
 @export var room_scene: PackedScene
@@ -53,16 +52,32 @@ const NEIGHBOR_DEEMPHASIS_SHADER := preload("res://Shaders/NeighborDeemphasis.gd
 @export var neighbor_blur := 2.0
 @export var emphasis_transition_duration := 0.15
 
+@export_group("Connection Markers")
+## Optional ground-marker sprites drawn at connection cells, one per
+## connection side. A RoomConnection's own marker_texture overrides these.
+## Leave all null to disable markers entirely.
+@export var door_marker_texture: Texture2D
+@export var corridor_marker_texture: Texture2D
+@export var stairway_marker_texture: Texture2D
+@export var portal_marker_texture: Texture2D
+
 var registry := RoomRegistry.new()
 var _connection_manager: RoomConnectionManager
+var _neighborhood: RoomNeighborhood
+var _visuals: RoomVisuals
 var entity_layer: Node2D
-var _room_materials: Dictionary = {}
-var _emphasis_from: Dictionary = {}
-var _emphasis_to: Dictionary = {}
-var _emphasis_tween: Tween
 var _hydrated_rooms: Dictionary = {}
-var _room_home: Dictionary = {}
-var _room_slide: Dictionary = {}
+
+## When non-empty, all room save/load operations are scoped to this
+## directory instead of RoomSaveSystem.save_dir. FloorManager sets this
+## to the active floor's directory (user://floors/<floor_id>/) so each
+## floor keeps independent room contents, connections, and player state.
+var save_directory := ""
+
+## Emitted whenever any registered room's contents change (tiles,
+## carpets, size) or its BlockLayer places/removes blocks. FloorManager
+## uses this for dirty tracking.
+signal room_content_changed
 
 ## Central registry of explicit RoomConnection links between rooms.
 ## Lazily created so it is usable before _ready runs.
@@ -71,6 +86,25 @@ var connections: RoomConnectionManager:
 		if _connection_manager == null:
 			_connection_manager = RoomConnectionManager.new(self)
 		return _connection_manager
+
+## Visible-neighborhood calculator (spatial bounds + connection graph
+## BFS). Lazily created; invalidate() is called on every layout or
+## connection change.
+var neighborhood: RoomNeighborhood:
+	get:
+		if _neighborhood == null:
+			_neighborhood = RoomNeighborhood.new(self)
+		return _neighborhood
+
+## Visual behavior component (de-emphasis, visibility, slide animations).
+## Lazily created as a child node so it can run tweens.
+var visuals: RoomVisuals:
+	get:
+		if _visuals == null:
+			_visuals = RoomVisuals.new(self)
+			_visuals.name = "RoomVisuals"
+			add_child(_visuals)
+		return _visuals
 
 func _ready() -> void:
 	add_to_group(&"room_worlds")
@@ -110,7 +144,7 @@ func register_room(room: Room, room_coordinates: Vector2i) -> bool:
 ## Registers a room under a unique ID at an explicit global world-grid
 ## origin. The room keeps its own local grid starting at (0, 0); the
 ## origin only positions it in the shared world cell space.
-func register_room_at(room: Room, room_id: Vector2i, global_origin: Vector2i) -> bool:
+func register_room_at(room: Room, room_id: Vector2i, global_origin: Vector2i, furniture_placements: Array[Resource] = []) -> bool:
 	if grid == null:
 		push_error("RoomWorld requires an IsometricGrid before registering rooms.")
 		return false
@@ -136,16 +170,22 @@ func register_room_at(room: Room, room_id: Vector2i, global_origin: Vector2i) ->
 	room.room_coordinates = room_id
 	room.cell_origin = global_origin
 	room.position = room_screen_offset_for_origin(global_origin)
-	_room_home[room] = room.position
+	visuals.set_room_home(room, room.position)
 	# Recenter depth sorting before layers are built so their first
 	# resync already uses in-range z_index values.
 	_update_depth_center()
 	if room.get_parent() == null:
 		add_child(room)
-	ensure_room_layers(room)
+	ensure_room_layers(room, furniture_placements)
+	if not room.cells_changed.is_connected(_on_room_content_changed):
+		room.cells_changed.connect(_on_room_content_changed)
+	if room.block_layer != null and not room.block_layer.content_changed.is_connected(_on_room_content_changed):
+		room.block_layer.content_changed.connect(_on_room_content_changed)
+	neighborhood.invalidate()
 	if show_room_labels:
 		_apply_room_label(room)
-	_apply_room_emphasis(room)
+	visuals.apply_emphasis(room)
+	visuals.refresh_connection_markers()
 	return true
 
 ## Recenters grid.depth_cell_center on the registered layout's world-cell
@@ -181,17 +221,23 @@ func _refresh_room_depths(room: Room) -> void:
 	var carpet_layer := room.get_node_or_null(^"CarpetLayer") as CarpetLayer
 	if carpet_layer != null:
 		carpet_layer.refresh_depths()
+	if room.floor_renderer != null:
+		room.floor_renderer.refresh_depth()
 
 func unregister_room(room_coordinates: Vector2i) -> bool:
 	var room := get_room(room_coordinates)
 	if room != null:
-		_kill_room_slide(room)
-		_room_materials.erase(room)
-		_room_home.erase(room)
+		visuals.forget_room(room)
 	var removed := registry.unregister(room_coordinates)
 	if removed:
 		disconnect_room(room_coordinates)
+		neighborhood.invalidate()
 		_update_depth_center()
+		visuals.refresh_connection_markers()
+		# The room node must not outlive its registration: floor switches
+		# rely on unregister to fully remove the previous floor's rooms.
+		if room != null and is_instance_valid(room):
+			room.queue_free()
 	return removed
 
 ## Human-readable layout problems (currently: overlapping room bounds).
@@ -207,13 +253,17 @@ func register_connection(connection: RoomConnection) -> bool:
 	if not connections.register(connection):
 		return false
 	# The connection graph feeds the visible neighborhood; refresh it.
-	_begin_emphasis_transition()
+	neighborhood.invalidate()
+	visuals.begin_transition()
+	visuals.refresh_connection_markers()
 	return true
 
 func unregister_connection(connection_id: StringName) -> bool:
 	if not connections.unregister(connection_id):
 		return false
-	_begin_emphasis_transition()
+	neighborhood.invalidate()
+	visuals.begin_transition()
+	visuals.refresh_connection_markers()
 	return true
 
 func get_connection(connection_id: StringName) -> RoomConnection:
@@ -247,6 +297,8 @@ func auto_connect_adjacent_rooms(connection_type: RoomConnection.ConnectionType 
 	for i in range(rooms.size()):
 		for j in range(i + 1, rooms.size()):
 			created += _connect_adjacent_pair(rooms[i], rooms[j], connection_type)
+	if created > 0:
+		visuals.refresh_connection_markers()
 	return created
 
 func _connect_adjacent_pair(first: Room, second: Room, connection_type: RoomConnection.ConnectionType) -> int:
@@ -285,6 +337,9 @@ func disconnect_room(room_id: Vector2i) -> int:
 		if connection.source_room_id == room_id or connection.destination_room_id == room_id:
 			if connections.unregister(connection.connection_id):
 				removed += 1
+	if removed > 0:
+		neighborhood.invalidate()
+		visuals.refresh_connection_markers()
 	return removed
 
 func get_room(room_coordinates: Vector2i) -> Room:
@@ -307,7 +362,32 @@ func create_room_at(room_id: Vector2i, global_origin: Vector2i, size := Vector2i
 	var dimensions := size if size != Vector2i.ZERO else room_dimensions
 	return _create_room(room_id, global_origin, dimensions, floor_colors)
 
-func _create_room(room_id: Vector2i, global_origin: Vector2i, dimensions: Vector2i, floor_colors: Array[Color]) -> Room:
+## Creates a room fully configured from a RoomDefinition at an explicit
+## global world-grid origin: size, floor texture, default tile, and the
+## definition's furniture and carpet placements are applied.
+func create_room_from_definition(room_id: Vector2i, global_origin: Vector2i, definition: RoomDefinition) -> Room:
+	if definition == null:
+		push_error("RoomWorld.create_room_from_definition requires a RoomDefinition.")
+		return null
+	var room := _create_room(room_id, global_origin, definition.size, [], definition.furniture_placements, definition)
+	if room == null:
+		return null
+	if definition.floor_texture != null:
+		room.floor_texture = definition.floor_texture
+		room._notify_changed()
+	for placement_resource in definition.carpet_placements:
+		var placement := placement_resource as CarpetPlacement
+		if placement == null:
+			push_error("Invalid carpet placement in RoomDefinition '%s'." % definition.room_id)
+			continue
+		var carpet_definition := carpet_catalog.get_definition(placement.carpet_id) if carpet_catalog != null else null
+		if carpet_definition == null:
+			push_error("Missing carpet definition for id: " + str(placement.carpet_id))
+			continue
+		room.place_carpet(carpet_definition, placement.grid_position, placement.rotation_degrees, false, placement.elevation)
+	return room
+
+func _create_room(room_id: Vector2i, global_origin: Vector2i, dimensions: Vector2i, floor_colors: Array[Color], furniture_placements: Array[Resource] = [], definition: RoomDefinition = null) -> Room:
 	if dimensions.x <= 0 or dimensions.y <= 0:
 		push_error("RoomWorld.create_room requires a positive room size.")
 		return null
@@ -319,18 +399,18 @@ func _create_room(room_id: Vector2i, global_origin: Vector2i, dimensions: Vector
 	room.name = _room_node_name(room_id)
 	room.grid = grid
 	room.size = dimensions
-	room.floor_texture = floor_texture
-	room.default_tile = _resolve_default_tile()
+	room.floor_texture = definition.floor_texture if definition != null and definition.floor_texture != null else floor_texture
+	room.default_tile = _resolve_default_tile(definition.default_tile_id if definition != null else default_tile_id)
 	if not floor_colors.is_empty():
 		room.floor_colors = floor_colors
 	room.debug_coordinates = debug_coordinates
 	add_child(room)
-	if not register_room_at(room, room_id, global_origin):
+	if not register_room_at(room, room_id, global_origin, furniture_placements):
 		room.queue_free()
 		return null
 	return room
 
-func ensure_room_layers(room: Room) -> void:
+func ensure_room_layers(room: Room, furniture_placements: Array[Resource] = []) -> void:
 	if room == null or grid == null:
 		return
 
@@ -371,6 +451,7 @@ func ensure_room_layers(room: Room) -> void:
 	block_layer.block_scene = block_scene
 	block_layer.block_catalog = block_catalog
 	block_layer.furniture_catalog = furniture_catalog
+	block_layer.furniture_placements = furniture_placements
 	if block_layer_is_new:
 		room.add_child(block_layer)
 	room.block_layer = block_layer
@@ -408,6 +489,23 @@ func get_room_at_global_cell(global_cell: Vector2i) -> Room:
 # Room state persistence
 # ------------------------------------------------------------------
 
+## Directory room saves actually target: save_directory when set
+## (floor-scoped), otherwise the global RoomSaveSystem.save_dir.
+func effective_save_directory() -> String:
+	return save_directory if not save_directory.is_empty() else RoomSaveSystem.save_dir
+
+## Runs callable with RoomSaveSystem.save_dir temporarily pointed at
+## this world's save scope, then restores it. GDScript has no exceptions,
+## so the restore always executes after the call returns.
+func _with_save_dir(callable: Callable) -> Variant:
+	if save_directory.is_empty():
+		return callable.call()
+	var previous := RoomSaveSystem.save_dir
+	RoomSaveSystem.save_dir = save_directory
+	var result: Variant = callable.call()
+	RoomSaveSystem.save_dir = previous
+	return result
+
 ## Loads the room's saved state the first time it is needed. Rooms without
 ## a save file keep their current (freshly created) contents.
 func ensure_room_loaded(room: Room) -> bool:
@@ -417,9 +515,10 @@ func ensure_room_loaded(room: Room) -> bool:
 	if _hydrated_rooms.has(coordinates):
 		return true
 	_hydrated_rooms[coordinates] = true
-	if RoomSaveSystem.room_state_candidates(coordinates, room.size).is_empty():
-		return false
-	return RoomSaveSystem.load_room_world_room(self, room)
+	return bool(_with_save_dir(func() -> bool:
+		if RoomSaveSystem.room_state_candidates(coordinates, room.size).is_empty():
+			return false
+		return RoomSaveSystem.load_room_world_room(self, room)))
 
 ## Forgets that a room was hydrated so its save is reloaded on next ensure.
 func reset_room_state(room: Room) -> void:
@@ -427,30 +526,45 @@ func reset_room_state(room: Room) -> void:
 		_hydrated_rooms.erase(room.room_coordinates)
 
 func save_room_state(room: Room) -> Error:
-	return RoomSaveSystem.save_room_world_room(self, room)
+	return _with_save_dir(func() -> Error:
+		return RoomSaveSystem.save_room_world_room(self, room)) as Error
 
 ## Saves every registered room plus the player's current room/position.
-func save_all_rooms() -> void:
+## Returns false when any file could not be written.
+func save_all_rooms() -> bool:
+	return bool(_with_save_dir(func() -> bool:
+		return _save_all_rooms()))
+
+func _save_all_rooms() -> bool:
+	var ok := true
 	var saved := 0
 	for room in registry.get_rooms():
 		var error := save_room_state(room)
 		if error == OK:
 			saved += 1
 		else:
+			ok = false
 			push_error("RoomWorld failed to save room %s (error %d)." % [room.room_coordinates, error])
 	var connection_error := RoomSaveSystem.save_connections(self)
 	if connection_error != OK:
+		ok = false
 		push_error("RoomWorld failed to save room connections (error %d)." % connection_error)
 	var player := _player()
 	if player != null and player.room != null:
 		var error := RoomSaveSystem.save_player_state(player.room.room_coordinates, player.grid_position, player.elevation)
 		if error != OK:
+			ok = false
 			push_error("RoomWorld failed to save player state (error %d)." % error)
-	print("RoomWorld saved %d room(s) to '%s'." % [saved, RoomSaveSystem.SAVE_DIR])
+	print("RoomWorld saved %d room(s) to '%s'." % [saved, effective_save_directory()])
+	return ok
 
 ## Loads every registered room's saved state (when present) and restores
 ## the player's saved room and position.
 func load_all_rooms() -> void:
+	_with_save_dir(func() -> void:
+		_load_all_rooms())
+
+func _load_all_rooms() -> void:
 	_hydrated_rooms.clear()
 	var loaded := 0
 	for room in registry.get_rooms():
@@ -458,9 +572,18 @@ func load_all_rooms() -> void:
 			loaded += 1
 	# Connections are restored only after every room is registered.
 	RoomSaveSystem.load_connections(self)
-	_begin_emphasis_transition()
+	neighborhood.invalidate()
+	visuals.begin_transition()
+	visuals.refresh_connection_markers()
 	_apply_saved_player_state()
-	print("RoomWorld loaded %d room(s) from '%s'." % [loaded, RoomSaveSystem.SAVE_DIR])
+	print("RoomWorld loaded %d room(s) from '%s'." % [loaded, effective_save_directory()])
+
+## Public wrapper for _apply_saved_player_state: used when the player
+## node is spawned after load_all_rooms already ran (floor-first boot).
+## Goes through _with_save_dir so it reads the floor-scoped directory.
+func apply_saved_player_state() -> void:
+	_with_save_dir(func() -> void:
+		_apply_saved_player_state())
 
 func _apply_saved_player_state() -> void:
 	var player := _player()
@@ -482,6 +605,22 @@ func _apply_saved_player_state() -> void:
 	player.place_at(saved_cell, float(state["elevation"]))
 	set_primary_room(coordinates)
 
+## Developer tool: reports every room_*.json save as compatible,
+## incompatible, orphan, or unreadable against the current layout.
+func audit_room_saves() -> Array[Dictionary]:
+	return _with_save_dir(func() -> Array[Dictionary]:
+		return RoomSaveSystem.audit_room_saves(self)) as Array[Dictionary]
+
+## Developer tool: moves incompatible/orphan room saves into
+## <save dir>/_quarantine/ for manual recovery. Never called
+## automatically; returns the number of files moved.
+func quarantine_incompatible_saves() -> int:
+	return int(_with_save_dir(func() -> int:
+		return RoomSaveSystem.quarantine_incompatible_saves(self)))
+
+func _on_room_content_changed() -> void:
+	room_content_changed.emit()
+
 func _player() -> Player:
 	if not is_inside_tree():
 		return null
@@ -501,27 +640,25 @@ func get_world_cell_bounds() -> Rect2i:
 		return Rect2i()
 	return Rect2i(minimum, maximum - minimum)
 
-func _resolve_default_tile() -> TileDefinition:
-	if default_tile_id == StringName() or tile_catalog == null:
+func _resolve_default_tile(tile_id: StringName = default_tile_id) -> TileDefinition:
+	if tile_id == StringName() or tile_catalog == null:
 		return null
-	var definition := tile_catalog.get_definition(default_tile_id)
+	var definition := tile_catalog.get_definition(tile_id)
 	if definition == null:
-		push_warning("RoomWorld: no tile definition found for id '%s'." % default_tile_id)
+		push_warning("RoomWorld: no tile definition found for id '%s'." % tile_id)
 	return definition
 
 func set_primary_room(room_coordinates: Vector2i) -> void:
 	if room_coordinates == primary_room_coordinates:
 		return
 	primary_room_coordinates = room_coordinates
-	_begin_emphasis_transition()
+	neighborhood.invalidate()
+	visuals.begin_transition()
 
 ## Re-applies emphasis targets instantly (no transition). Useful after
 ## changing the neighbor_* exports at runtime.
 func refresh_room_emphasis() -> void:
-	_kill_emphasis_tween()
-	_update_deemphasis_material()
-	for room in registry.get_rooms():
-		_apply_room_emphasis(room)
+	visuals.refresh()
 
 ## Rooms directly linked to room_id by any registered connection
 ## (either direction, interactive or spatial). Used by the debug HUD.
@@ -534,226 +671,30 @@ func get_connected_room_ids(room_id: Vector2i) -> Array[Vector2i]:
 	return result
 
 ## Coordinates of every room currently inside the visible neighborhood:
-## the primary room plus its geometric and connection-graph neighbors.
+## the primary room plus its spatial and connection-graph neighbors.
 func get_visible_room_coordinates() -> Array[Vector2i]:
 	var result: Array[Vector2i] = [primary_room_coordinates]
 	for room in registry.get_rooms():
-		if room != null and _is_neighbor_room(room.room_coordinates):
+		if room != null and neighborhood.is_neighbor(room.room_coordinates):
 			result.append(room.room_coordinates)
 	return result
 
 ## Connection-graph distance (BFS hops) from the primary room to
 ## room_coordinates, or -1 when unreachable / depth disabled.
 func connection_distance_from_primary(room_coordinates: Vector2i) -> int:
-	if room_coordinates == primary_room_coordinates:
-		return 0
-	if connection_neighborhood_depth <= 0:
-		return -1
-	var distances := {primary_room_coordinates: 0}
-	var frontier: Array[Vector2i] = [primary_room_coordinates]
-	while not frontier.is_empty():
-		var next: Array[Vector2i] = []
-		for room_id in frontier:
-			var step := int(distances[room_id]) + 1
-			if step > connection_neighborhood_depth:
-				continue
-			for other in get_connected_room_ids(room_id):
-				if distances.has(other):
-					continue
-				distances[other] = step
-				next.append(other)
-		frontier = next
-	return int(distances.get(room_coordinates, -1))
+	return neighborhood.connection_distance(room_coordinates)
 
 ## Room ids whose global bounds intersect room_id's bounds grown by
 ## neighborhood_padding — i.e. rooms physically touching or overlapping
 ## the given room, regardless of room ids or dimensions.
 func get_spatial_neighbors(room_id: Vector2i) -> Array[Vector2i]:
-	var room := get_room(room_id)
-	if room == null:
-		return []
-	var grown := room.global_bounds().grow(neighborhood_padding)
-	var result: Array[Vector2i] = []
-	for other in registry.get_rooms():
-		if other == null or other == room:
-			continue
-		if grown.intersects(other.global_bounds()):
-			result.append(other.room_coordinates)
-	return result
+	return neighborhood.spatial_neighbors(room_id)
 
 ## Spatial distance (bounds-adjacency BFS hops) from the primary room to
 ## room_coordinates, or -1 when out of range / depth disabled.
 func spatial_distance_from_primary(room_coordinates: Vector2i) -> int:
-	if room_coordinates == primary_room_coordinates:
-		return 0
-	if spatial_neighborhood_depth <= 0:
-		return -1
-	var distances := {primary_room_coordinates: 0}
-	var frontier: Array[Vector2i] = [primary_room_coordinates]
-	while not frontier.is_empty():
-		var next: Array[Vector2i] = []
-		for room_id in frontier:
-			var step := int(distances[room_id]) + 1
-			if step > spatial_neighborhood_depth:
-				continue
-			for other in get_spatial_neighbors(room_id):
-				if distances.has(other):
-					continue
-				distances[other] = step
-				next.append(other)
-		frontier = next
-	return int(distances.get(room_coordinates, -1))
+	return neighborhood.spatial_distance(room_coordinates)
 
-func _is_neighbor_room(room_coordinates: Vector2i) -> bool:
-	if room_coordinates == primary_room_coordinates:
-		return false
-	if spatial_distance_from_primary(room_coordinates) > 0:
-		return true
-	return connection_distance_from_primary(room_coordinates) > 0
-
-func _target_emphasis(room_coordinates: Vector2i) -> float:
-	if not deemphasize_neighbors or room_coordinates == primary_room_coordinates:
-		return 0.0
-	return 1.0
-
-func _apply_room_emphasis(room: Room) -> void:
-	if room == null:
-		return
-	_update_room_visibility(room)
-	_set_room_strength(room, _target_emphasis(room.room_coordinates))
-
-func _update_room_visibility(room: Room) -> void:
-	var is_primary := room.room_coordinates == primary_room_coordinates
-	var is_neighbor := _is_neighbor_room(room.room_coordinates)
-	var should_show := is_primary or is_neighbor or not hide_rooms_outside_neighborhood
-	var slide: Dictionary = _room_slide.get(room, {})
-	var exiting := bool(slide.get("exiting", false))
-
-	if should_show:
-		if exiting:
-			_kill_room_slide(room)
-			room.position = _room_home.get(room, room.position)
-		if not room.visible:
-			room.visible = true
-			if room_slide_duration > 0.0 and is_inside_tree():
-				_start_room_slide(room, false)
-	elif exiting:
-		# A slide-out started before room_slide_duration was zeroed would
-		# otherwise keep the room visible forever; cancel it immediately.
-		if room_slide_duration <= 0.0:
-			_kill_room_slide(room)
-			if room.visible:
-				room.visible = false
-	elif room.visible:
-		if room_slide_duration > 0.0 and is_inside_tree():
-			_start_room_slide(room, true)
-		else:
-			room.visible = false
-
-func _start_room_slide(room: Room, exiting: bool) -> void:
-	_kill_room_slide(room)
-	var home: Vector2 = _room_home.get(room, room.position)
-	var target := home + Vector2(0.0, room_slide_distance if exiting else -room_slide_distance)
-	if not exiting:
-		room.position = target
-	room.is_sliding = true
-	var tween := create_tween()
-	tween.set_trans(Tween.TRANS_QUAD)
-	tween.set_ease(Tween.EASE_OUT if not exiting else Tween.EASE_IN)
-	tween.tween_property(room, "position", home if not exiting else target, room_slide_duration)
-	tween.finished.connect(_on_room_slide_finished.bind(room))
-	_room_slide[room] = {"tween": tween, "exiting": exiting}
-
-func _on_room_slide_finished(room: Room) -> void:
-	if not is_instance_valid(room):
-		for key in _room_slide.keys():
-			if not is_instance_valid(key):
-				_room_slide.erase(key)
-		return
-	var slide: Dictionary = _room_slide.get(room, {})
-	var exiting := bool(slide.get("exiting", false))
-	_room_slide.erase(room)
-	room.is_sliding = false
-	room.position = _room_home.get(room, room.position)
-	if exiting:
-		room.visible = false
-
-func _kill_room_slide(room: Room) -> void:
-	var slide: Dictionary = _room_slide.get(room, {})
-	var tween: Tween = slide.get("tween")
-	if tween != null and is_instance_valid(tween):
-		tween.kill()
-	_room_slide.erase(room)
-	if is_instance_valid(room):
-		room.is_sliding = false
-
-func _begin_emphasis_transition() -> void:
-	_kill_emphasis_tween()
-	_emphasis_from.clear()
-	_emphasis_to.clear()
-	for room in registry.get_rooms():
-		if room == null:
-			continue
-		_update_room_visibility(room)
-		_emphasis_from[room] = _current_emphasis(room)
-		_emphasis_to[room] = _target_emphasis(room.room_coordinates)
-	if emphasis_transition_duration <= 0.0 or not is_inside_tree():
-		_apply_emphasis_blend(1.0)
-		return
-	_emphasis_tween = create_tween()
-	_emphasis_tween.tween_method(_apply_emphasis_blend, 0.0, 1.0, emphasis_transition_duration).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-
-func _apply_emphasis_blend(t: float) -> void:
-	for room in _emphasis_from:
-		var from := float(_emphasis_from[room])
-		var to := float(_emphasis_to.get(room, from))
-		_set_room_strength(room, lerpf(from, to, t))
-
-func _current_emphasis(room: Room) -> float:
-	if room == null or room.deemphasis_material == null:
-		return 0.0
-	var mat := room.deemphasis_material as ShaderMaterial
-	if mat == null:
-		return 0.0
-	var value: Variant = mat.get_shader_parameter(&"strength")
-	return float(value) if value != null else 0.0
-
-func _set_room_strength(room: Room, strength: float) -> void:
-	if room == null:
-		return
-	if strength <= 0.001:
-		if _room_materials.has(room):
-			room.clear_deemphasis()
-			_room_materials.erase(room)
-		return
-	var mat := _ensure_room_material(room)
-	mat.set_shader_parameter(&"strength", strength)
-
-func _ensure_room_material(room: Room) -> ShaderMaterial:
-	var mat: ShaderMaterial = _room_materials.get(room)
-	if mat == null or not is_instance_valid(mat):
-		mat = ShaderMaterial.new()
-		mat.shader = NEIGHBOR_DEEMPHASIS_SHADER
-		_set_deemphasis_params(mat)
-		_room_materials[room] = mat
-		room.set_deemphasis(mat)
-	return mat
-
-func _update_deemphasis_material() -> void:
-	for mat in _room_materials.values():
-		if is_instance_valid(mat):
-			_set_deemphasis_params(mat)
-
-func _set_deemphasis_params(mat: ShaderMaterial) -> void:
-	mat.set_shader_parameter(&"saturation", neighbor_saturation)
-	mat.set_shader_parameter(&"brightness", neighbor_brightness)
-	mat.set_shader_parameter(&"alpha", neighbor_alpha)
-	mat.set_shader_parameter(&"blur", neighbor_blur)
-
-func _kill_emphasis_tween() -> void:
-	if _emphasis_tween != null and is_instance_valid(_emphasis_tween):
-		_emphasis_tween.kill()
-	_emphasis_tween = null
 
 func _room_node_name(room_coordinates: Vector2i) -> String:
 	return "Room_%d_%d" % [room_coordinates.x, room_coordinates.y]

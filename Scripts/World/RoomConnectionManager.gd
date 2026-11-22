@@ -124,13 +124,18 @@ func size() -> int:
 ## and stepped out of bounds. When direction is non-zero, only connections
 ## whose destination room contains the neighboring world cell in that
 ## direction are considered — a cell on a room corner can be a covered
-## exit for two different connections. Returns {"connection", "room_id",
-## "cell"} for the paired entry, or {} when nothing covers the cell.
+## exit for two different connections. When no connection's destination
+## contains the neighbor cell the lookup fails rather than guessing, so a
+## step into empty space can never trigger a wrong-room transition.
+## Multiple surviving candidates are resolved deterministically by
+## connection id and reported as ambiguous. Returns {"connection",
+## "room_id", "cell"} for the paired entry, or {} when nothing valid
+## covers the cell.
 func find_exit(room: Room, local_cell: Vector2i, direction := Vector2i.ZERO) -> Dictionary:
 	if room == null:
 		return {}
 	var room_id := room.room_coordinates
-	var fallback := {}
+	var matches: Array[Dictionary] = []
 	var neighbor_world := Vector2i.ZERO
 	if direction != Vector2i.ZERO:
 		neighbor_world = room.world_cell_coordinates(local_cell) + direction
@@ -144,24 +149,47 @@ func find_exit(room: Room, local_cell: Vector2i, direction := Vector2i.ZERO) -> 
 		if not exits.has(local_cell):
 			continue
 		var entries: Array[Vector2i] = traversal["entries"]
-		var result := {
+		matches.append({
 			"connection": connection,
 			"room_id": traversal["room_id"],
 			"cell": connection.entry_for(exits, entries, local_cell),
 			"reversed": traversal["reversed"],
-		}
-		if direction == Vector2i.ZERO:
-			return result
-		if fallback.is_empty():
-			fallback = result
-		var dest_room := _room(traversal["room_id"])
-		if dest_room != null and dest_room.global_bounds().has_point(neighbor_world):
-			return result
-	return fallback
+		})
+	if matches.is_empty():
+		return {}
+	# A single covering connection always wins: explicit connections may
+	# legitimately target non-adjacent rooms, so direction only matters
+	# when several connections claim the same exit cell.
+	if matches.size() == 1:
+		return matches[0]
+	# Deterministic order so ambiguous picks are stable across runs.
+	matches.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return str((a["connection"] as RoomConnection).connection_id) < str((b["connection"] as RoomConnection).connection_id))
+	if direction != Vector2i.ZERO:
+		var directed: Array[Dictionary] = []
+		for match in matches:
+			var dest_room := _room(match["room_id"])
+			if dest_room != null and dest_room.global_bounds().has_point(neighbor_world):
+				directed.append(match)
+		if directed.is_empty():
+			push_warning("RoomConnectionManager: %d connection(s) cover exit cell %s in room %s but none leads toward %s; transition refused." % [
+				matches.size(), local_cell, room_id, neighbor_world])
+			return {}
+		matches = directed
+	if matches.size() > 1:
+		var ids: Array[String] = []
+		for match in matches:
+			ids.append(str((match["connection"] as RoomConnection).connection_id))
+		push_warning("RoomConnectionManager: ambiguous exit at %s in room %s (%s); using '%s'." % [
+			local_cell, room_id, ", ".join(ids), str((matches[0]["connection"] as RoomConnection).connection_id)])
+	return matches[0]
 
 ## Interactive entry lookup: returns the transition info when the player
-## steps onto local_cell inside the room with room_id, or {}.
+## steps onto local_cell inside the room with room_id, or {}. When
+## several interactive connections cover the same cell the pick is
+## deterministic (lowest connection id) and reported as ambiguous.
 func find_entry(room_id: Vector2i, local_cell: Vector2i) -> Dictionary:
+	var matches: Array[Dictionary] = []
 	for connection in get_all_connections():
 		if not connection.interactive:
 			continue
@@ -172,13 +200,23 @@ func find_entry(room_id: Vector2i, local_cell: Vector2i) -> Dictionary:
 		if not exits.has(local_cell):
 			continue
 		var entries: Array[Vector2i] = traversal["entries"]
-		return {
+		matches.append({
 			"connection": connection,
 			"room_id": traversal["room_id"],
 			"cell": connection.entry_for(exits, entries, local_cell),
 			"reversed": traversal["reversed"],
-		}
-	return {}
+		})
+	if matches.is_empty():
+		return {}
+	matches.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return str((a["connection"] as RoomConnection).connection_id) < str((b["connection"] as RoomConnection).connection_id))
+	if matches.size() > 1:
+		var ids: Array[String] = []
+		for match in matches:
+			ids.append(str((match["connection"] as RoomConnection).connection_id))
+		push_warning("RoomConnectionManager: ambiguous interactive entry at %s in room %s (%s); using '%s'." % [
+			local_cell, room_id, ", ".join(ids), str((matches[0]["connection"] as RoomConnection).connection_id)])
+	return matches[0]
 
 # ------------------------------------------------------------------
 # Validation & persistence
@@ -232,8 +270,28 @@ func serialize_all() -> Array:
 			"destination_room": [connection.destination_room_id.x, connection.destination_room_id.y],
 			"source_cells": _serialize_cells(connection.source_cells),
 			"destination_cells": _serialize_cells(connection.destination_cells),
+			"marker": _serialize_marker(connection.marker_texture),
 		})
 	return data
+
+func _serialize_marker(texture: Texture2D) -> String:
+	if texture == null:
+		return ""
+	var path := texture.resource_path
+	return path if path.begins_with("res://") else ""
+
+func _deserialize_marker(value: Variant) -> Texture2D:
+	if not (value is String) or String(value).is_empty():
+		return null
+	var path := String(value)
+	if not ResourceLoader.exists(path):
+		push_warning("RoomConnectionManager: marker texture '%s' missing; skipped." % path)
+		return null
+	var resource := ResourceLoader.load(path)
+	if resource is Texture2D:
+		return resource
+	push_warning("RoomConnectionManager: marker '%s' is not a Texture2D; skipped." % path)
+	return null
 
 func _serialize_cells(cells: Array[Vector2i]) -> Array:
 	var result: Array = []
@@ -257,6 +315,9 @@ func deserialize_all(data: Variant) -> int:
 		var connection := _deserialize(entry)
 		if connection == null:
 			continue
+		if _room(connection.source_room_id) == null or _room(connection.destination_room_id) == null:
+			push_warning("RoomConnectionManager: skipping connection '%s' referencing a missing room." % connection.connection_id)
+			continue
 		if register(connection):
 			loaded += 1
 	return loaded
@@ -274,6 +335,7 @@ func _deserialize(entry: Dictionary) -> RoomConnection:
 	connection.destination_room_id = _read_id(entry.get("destination_room"))
 	connection.source_cells = _read_cells(entry.get("source_cells"))
 	connection.destination_cells = _read_cells(entry.get("destination_cells"))
+	connection.marker_texture = _deserialize_marker(entry.get("marker"))
 	return connection
 
 func _read_id(value: Variant) -> Vector2i:
