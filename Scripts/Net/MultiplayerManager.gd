@@ -63,12 +63,14 @@ var _local_state_history: Array = []
 const LOCAL_STATE_HISTORY := 12
 ## Build ops (Phase B1): client request serial + server-side dedup.
 var _build_op_serial := 0
-var _seen_build_ops := {}
-const BUILD_OP_HISTORY := 32
-## Debug: --build-place=x,y:id / --build-remove=x,y run once after
-## sync for headless live tests; --dump-world=N delays the dump N sec.
-var _debug_place := {}
-var _debug_remove := {}
+## peer_id -> highest build op id seen. Client op ids are strictly
+## increasing per session, so anything <= the max is a replay — this
+## rejects replays forever, unlike a sliding window.
+var _build_op_max := {}
+## Debug: --build-op=place:x,y:category:id[:rot[:flip]] (repeatable)
+## and --build-op=remove:x,y run once each after sync for headless
+## live tests; --dump-world=N delays the dump N sec.
+var _debug_ops: Array = []
 var _synced_msec := -1
 var _dump_at_msec := 0
 ## Client UI feedback: emitted for every build result this peer
@@ -95,10 +97,22 @@ static func parse_args(args: PackedStringArray) -> Dictionary:
 			result["dump_world"] = true
 			if arg.contains("="):
 				result["dump_delay"] = arg.get_slice("=", 1).to_float()
+		elif arg.begins_with("--build-op="):
+			if not result.has("build_ops"):
+				result["build_ops"] = []
+			(result["build_ops"] as Array).append(arg.get_slice("=", 1))
 		elif arg.begins_with("--build-place="):
-			result["build_place"] = arg.get_slice("=", 1)
+			# Legacy single-op form: x,y:id -> block place.
+			if not result.has("build_ops"):
+				result["build_ops"] = []
+			var spec := arg.get_slice("=", 1).split(":")
+			(result["build_ops"] as Array).append(
+				"place:%s:block:%s" % [spec[0], spec[1] if spec.size() > 1 else "standard_block"])
 		elif arg.begins_with("--build-remove="):
-			result["build_remove"] = arg.get_slice("=", 1)
+			if not result.has("build_ops"):
+				result["build_ops"] = []
+			(result["build_ops"] as Array).append(
+				"remove:%s" % arg.get_slice("=", 1))
 	if not result.has("mode"):
 		return {}
 	if not result.has("address"):
@@ -148,8 +162,7 @@ func setup(world: WorldBootstrap, args: Dictionary) -> void:
 	_dump_world = args.get("dump_world", false)
 	_dump_at_msec = Time.get_ticks_msec() \
 		+ int(float(args.get("dump_delay", 0.0)) * 1000.0)
-	_debug_place = _parse_build_arg(args.get("build_place", ""), true)
-	_debug_remove = _parse_build_arg(args.get("build_remove", ""), false)
+	_debug_ops = _parse_build_ops(args.get("build_ops", []))
 
 func _process(delta: float) -> void:
 	if mode == Mode.CLIENT:
@@ -197,11 +210,31 @@ func _dump_world_state(tag: String) -> void:
 		var blocks: Array[String] = []
 		if room.block_layer != null:
 			for block in room.block_layer.blocks:
-				blocks.append("%s@%s" % [block.block_id, block.grid_position])
-		print("WORLD_DUMP %s floor=%s room=%s size=%s blocks=[%s] contents=%s" % [
+				blocks.append("%s@%s(e=%.2f)" % [block.block_id,
+					block.grid_position, block.elevation])
+		# Anomalous tile overrides only (non-default id or nonzero
+		# elevation) — matches placed_content_counts' "tiles" rule.
+		var tiles: Array[String] = []
+		var carpets: Array[String] = []
+		var default_tile_id := StringName()
+		if room.default_tile != null:
+			default_tile_id = room.default_tile.object_id
+		for local_cell in room.cells:
+			var cell := room.get_cell(local_cell)
+			if cell == null:
+				continue
+			if cell.tile != null \
+					and (cell.tile.object_id != default_tile_id \
+						or not is_equal_approx(cell.tile_elevation, 0.0)):
+				tiles.append("%s@%s(e=%.2f)" % [
+					cell.tile.object_id, local_cell, cell.tile_elevation])
+			if cell.carpet != null and cell.carpet_anchor == local_cell:
+				carpets.append("%s@%s" % [cell.carpet.object_id, local_cell])
+		print("WORLD_DUMP %s floor=%s room=%s size=%s blocks=[%s] tiles=[%s] carpets=[%s] contents=%s" % [
 			tag, _world.floor_manager.active_floor.floor_id \
 				if _world.floor_manager.active_floor != null else &"?",
-			room.room_coordinates, room.size, ", ".join(blocks), counts])
+			room.room_coordinates, room.size, ", ".join(blocks),
+			", ".join(tiles), ", ".join(carpets), counts])
 	var conns: Array = world.connections.serialize_all()
 	print("WORLD_DUMP %s connections=%d" % [tag, conns.size()])
 
@@ -268,7 +301,7 @@ func _on_peer_disconnected(peer_id: int) -> void:
 	if mode != Mode.SERVER:
 		return
 	_pending_peers.erase(peer_id)
-	_seen_build_ops.erase(peer_id)
+	_build_op_max.erase(peer_id)
 	var body: Player = _bodies.get(peer_id)
 	if body != null:
 		body.queue_free()
@@ -502,33 +535,40 @@ func _rpc_world_ready() -> void:
 func can_request_build() -> bool:
 	return mode == Mode.CLIENT and _connected and world_synced
 
-## Client -> server: place a plain block. room_id/cell are room-local;
-## the server recomputes elevation and re-validates everything.
+## Client -> server: place any synchronized category. category is one
+## of BuildOps.CATEGORIES; rotation/flip apply to furniture/carpet.
 func request_build_place(room_id: Vector2i, cell: Vector2i,
-		object_id: StringName, flip: bool) -> bool:
+		category: StringName, object_id: StringName,
+		rotation: int = 0, flip: bool = false) -> bool:
 	if not can_request_build():
 		return false
 	_build_op_serial += 1
-	_rpc_build_place.rpc_id(1, _build_op_serial, room_id, cell,
-		object_id, flip)
+	_rpc_build_place.rpc_id(1, _build_op_serial, {
+		"room_id": room_id, "cell": cell, "category": category,
+		"object_id": object_id, "rotation": rotation, "flip": flip})
 	return true
 
-## Client -> server: remove the block the requester saw at cell.
-## target_* identify it so a changed topmost block rejects as stale.
+## Client -> server: remove the occupant the requester saw at cell.
+## The identity fields must match what topmost_at() reported so a
+## changed topmost target rejects as stale.
 func request_build_remove(room_id: Vector2i, cell: Vector2i,
-		block_id: StringName, block_pos: Vector2i, block_elev: float) -> bool:
+		category: StringName, object_id: StringName,
+		pos: Vector2i = Vector2i.ZERO, elev: float = 0.0,
+		anchor: Vector2i = Vector2i.ZERO, rotation: int = 0,
+		flip: bool = false) -> bool:
 	if not can_request_build():
 		return false
 	_build_op_serial += 1
-	_rpc_build_remove.rpc_id(1, _build_op_serial, room_id, cell,
-		block_id, block_pos, block_elev)
+	_rpc_build_remove.rpc_id(1, _build_op_serial, {
+		"room_id": room_id, "cell": cell, "category": category,
+		"object_id": object_id, "pos": pos, "elev": elev,
+		"anchor": anchor, "rotation": rotation, "flip": flip})
 	return true
 
 ## World cells occupied by every player body plus the server's own
 ## avatar — placement/removal must not target any of them.
 func _player_world_cells() -> Array:
 	var cells: Array = []
-	var world := _world.room_world if _world != null else null
 	for body in _bodies.values():
 		if body != null and is_instance_valid(body) and body.room != null:
 			cells.append(body.room.world_cell_coordinates(body.grid_position))
@@ -538,15 +578,16 @@ func _player_world_cells() -> Array:
 	return cells
 
 ## Per-peer op-id dedup: reliable RPCs do not duplicate deliveries,
-## but a resent/replayed request must never apply twice.
+## but a resent/replayed request must never apply twice. Op ids are
+## monotonic per client session, so rejecting anything at or below the
+## highest id seen closes the replay window permanently.
 func _claim_build_op(peer_id: int, op_id: int) -> bool:
-	var seen: Dictionary = _seen_build_ops.get(peer_id, {})
-	if seen.has(op_id):
+	if op_id <= 0:
 		return false
-	seen[op_id] = true
-	while seen.size() > BUILD_OP_HISTORY:
-		seen.erase(seen.keys()[0])
-	_seen_build_ops[peer_id] = seen
+	var max_seen := int(_build_op_max.get(peer_id, 0))
+	if op_id <= max_seen:
+		return false
+	_build_op_max[peer_id] = op_id
 	return true
 
 func _reject_build(peer_id: int, op_id: int, reason: StringName) -> void:
@@ -559,8 +600,7 @@ func _reject_build(peer_id: int, op_id: int, reason: StringName) -> void:
 # ------------------------------------------------------------------
 
 @rpc("any_peer", "call_remote", "reliable")
-func _rpc_build_place(op_id: int, room_id: Vector2i, cell: Vector2i,
-		object_id: StringName, flip: bool) -> void:
+func _rpc_build_place(op_id: int, request: Dictionary) -> void:
 	if mode != Mode.SERVER:
 		return
 	var sender := multiplayer.get_remote_sender_id()
@@ -571,28 +611,35 @@ func _rpc_build_place(op_id: int, room_id: Vector2i, cell: Vector2i,
 	if not _bodies.has(sender):
 		_reject_build(sender, op_id, &"not_ready")
 		return
-	var result := BuildOps.validate_place(_world.room_world,
-		_player_world_cells(), room_id, cell, object_id)
+	var result := BuildOps.validate_place_any(_world.room_world,
+		_player_world_cells(), request)
 	if not bool(result.get("ok", false)):
 		_reject_build(sender, op_id, result.get("reason", &"invalid"))
 		return
-	var block := BuildOps.apply_place(result["room"], cell, object_id,
-		float(result["elevation"]), flip)
-	if block == null:
+	var room: Room = result["room"]
+	var cell: Vector2i = request.get("cell", Vector2i.ZERO)
+	var category := StringName(str(request.get("category", "block")))
+	var object_id := StringName(str(request.get("object_id", "")))
+	var rotation := BuildOps.req_int(request.get("rotation"))
+	var flip := BuildOps.req_bool(request.get("flip"))
+	var applied: Variant = BuildOps.apply_place_any(_world.room_world, room,
+		category, cell, object_id, float(result["elevation"]), rotation, flip)
+	# Blocks/furniture return the placed node (or null); carpet/tile
+	# return bool — comparing an Object to false is a runtime error.
+	if applied == null or (applied is bool and applied == false):
 		_reject_build(sender, op_id, &"apply_failed")
 		return
 	# Broadcast AFTER the authoritative apply; every synced client
 	# reproduces it locally without generating another request.
 	_rpc_build_result.rpc(op_id, true, &"", {
-		"kind": "place", "room_id": room_id, "cell": cell,
-		"object_id": object_id, "elevation": result["elevation"],
-		"flip": flip})
-	print("MultiplayerManager: build op %d place %s @%s room %s applied." % [
-		op_id, object_id, cell, room_id])
+		"kind": "place", "room_id": request.get("room_id", Vector2i.ZERO),
+		"cell": cell, "category": category, "object_id": object_id,
+		"elevation": result["elevation"], "rotation": rotation, "flip": flip})
+	print("MultiplayerManager: build op %d place %s %s @%s room %s applied." % [
+		op_id, category, object_id, cell, request.get("room_id")])
 
 @rpc("any_peer", "call_remote", "reliable")
-func _rpc_build_remove(op_id: int, room_id: Vector2i, cell: Vector2i,
-		block_id: StringName, block_pos: Vector2i, block_elev: float) -> void:
+func _rpc_build_remove(op_id: int, request: Dictionary) -> void:
 	if mode != Mode.SERVER:
 		return
 	var sender := multiplayer.get_remote_sender_id()
@@ -602,23 +649,51 @@ func _rpc_build_remove(op_id: int, room_id: Vector2i, cell: Vector2i,
 	if not _bodies.has(sender):
 		_reject_build(sender, op_id, &"not_ready")
 		return
-	var result := BuildOps.validate_remove(_world.room_world,
-		_player_world_cells(), room_id, cell, block_id, block_pos, block_elev)
+	var result := BuildOps.validate_remove_any(_world.room_world,
+		_player_world_cells(), request)
 	if not bool(result.get("ok", false)):
 		_reject_build(sender, op_id, result.get("reason", &"invalid"))
 		return
-	var removed: Block = result["block"]
+	var room: Room = result["room"]
+	var top: Dictionary = result["target"]
+	var category := StringName(str(request.get("category", "")))
+	var cell: Vector2i = request.get("cell", Vector2i.ZERO)
+	# The broadcast carries the AUTHORITATIVE target identity, not
+	# whatever the requester claimed.
 	var payload := {
-		"kind": "remove", "room_id": room_id, "cell": cell,
-		"block_id": removed.block_id, "block_pos": removed.grid_position,
-		"block_elev": removed.elevation}
-	if not BuildOps.apply_remove(result["room"], cell, removed.block_id,
-			removed.grid_position, removed.elevation):
+		"kind": "remove", "room_id": request.get("room_id", Vector2i.ZERO),
+		"cell": cell, "category": category,
+		"object_id": StringName(str(request.get("object_id", ""))),
+		"pos": request.get("pos", Vector2i.ZERO),
+		"elev": BuildOps.req_float(request.get("elev")),
+		"anchor": request.get("anchor", Vector2i.ZERO),
+		"rotation": BuildOps.req_int(request.get("rotation")),
+		"flip": BuildOps.req_bool(request.get("flip"))}
+	match category:
+		&"block", &"furniture":
+			var block: Block = top["block"]
+			payload["object_id"] = block.block_id
+			payload["pos"] = block.grid_position
+			payload["elev"] = block.elevation
+			payload["rotation"] = block.furniture_rotation_degrees \
+				if block is Furniture else 0
+		&"carpet":
+			payload["object_id"] = (top["carpet"] as CarpetDefinition).object_id
+			payload["anchor"] = top["anchor"]
+			payload["rotation"] = int(top["rotation"])
+			payload["flip"] = bool(top["flip"])
+			payload["elev"] = float(top["elevation"])
+		&"tile":
+			payload["object_id"] = (top["tile"] as TileDefinition).object_id
+			payload["elev"] = float(top["elevation"])
+	if not BuildOps.apply_remove_any(_world.room_world, room, category, cell,
+			payload["object_id"], payload["pos"], payload["elev"],
+			payload["anchor"], payload["rotation"], payload["flip"]):
 		_reject_build(sender, op_id, &"apply_failed")
 		return
 	_rpc_build_result.rpc(op_id, true, &"", payload)
 	print("MultiplayerManager: build op %d remove %s @%s room %s applied." % [
-		op_id, removed.block_id, cell, room_id])
+		op_id, category, cell, request.get("room_id")])
 
 ## Server -> all clients: authoritative build outcome. accepted=true
 ## carries the payload needed to reproduce the op locally; false is
@@ -636,41 +711,75 @@ func _rpc_build_result(op_id: int, accepted: bool, reason: StringName,
 	if room == null:
 		push_warning("MultiplayerManager: build result for unknown room %s ignored." % room_id)
 		return
+	var cell: Vector2i = payload.get("cell", Vector2i.ZERO)
+	var category := StringName(str(payload.get("category", "block")))
+	var object_id := StringName(str(payload.get("object_id", "")))
+	var applied: Variant = null
 	match String(payload.get("kind", "")):
 		"place":
-			BuildOps.apply_place(room, payload.get("cell", Vector2i.ZERO),
-				payload.get("object_id", &""),
-				float(payload.get("elevation", 0.0)),
-				bool(payload.get("flip", false)))
+			applied = BuildOps.apply_place_any(_world.room_world, room, category,
+				cell, object_id, float(payload.get("elevation", 0.0)),
+				int(payload.get("rotation", 0)), bool(payload.get("flip", false)))
 		"remove":
-			BuildOps.apply_remove(room, payload.get("cell", Vector2i.ZERO),
-				payload.get("block_id", &""),
-				payload.get("block_pos", Vector2i.ZERO),
-				float(payload.get("block_elev", 0.0)))
+			applied = BuildOps.apply_remove_any(_world.room_world, room, category,
+				cell, object_id, payload.get("pos", Vector2i.ZERO),
+				float(payload.get("elev", 0.0)),
+				payload.get("anchor", Vector2i.ZERO),
+				int(payload.get("rotation", 0)), bool(payload.get("flip", false)))
+	# A failed local apply means this replica diverged from the
+	# authoritative world — surface it instead of silently drifting.
+	if applied == null or (applied is bool and applied == false):
+		push_warning("MultiplayerManager: build op %d %s failed to apply locally "
+			+ "(world may diverge until next snapshot)." % [op_id, payload.get("kind")])
+	print("MultiplayerManager: build op %d %s %s @%s applied on peer %d." % [
+		op_id, payload.get("kind"), category, cell, my_peer_id])
 	build_result.emit(op_id, true, &"")
 	print("MultiplayerManager: build op %d applied locally (%s)." % [
 		op_id, payload.get("kind", "?")])
 
 # ------------------------------------------------------------------
-# Debug build ops for headless live tests (--build-place/--build-remove)
+# Debug build ops for headless live tests (--build-op / legacy flags)
 # ------------------------------------------------------------------
 
-func _parse_build_arg(spec: String, is_place: bool) -> Dictionary:
-	if spec.is_empty():
-		return {}
-	var parts := spec.split(":")
-	var cell_parts := parts[0].split(",")
-	if cell_parts.size() != 2:
-		push_warning("MultiplayerManager: bad build arg '%s'." % spec)
-		return {}
-	var result := {"cell": Vector2i(cell_parts[0].to_int(), cell_parts[1].to_int()),
-		"done": false}
-	if is_place and parts.size() > 1:
-		result["object_id"] = StringName(parts[1])
-	return result if is_place or parts.size() == 1 else {}
+## Parses --build-op specs into _debug_ops entries:
+## "place:x,y:category:object_id[:rotation[:flip]]" or "remove:x,y".
+func _parse_build_ops(specs: Variant) -> Array:
+	var ops: Array = []
+	for spec in specs if specs is Array else []:
+		var parts := String(spec).split(":")
+		if parts.size() < 2:
+			push_warning("MultiplayerManager: ignoring malformed --build-op '%s'." % spec)
+			continue
+		var kind := parts[0]
+		var cell := Vector2i.ZERO
+		var coords := parts[1].split(",")
+		if coords.size() == 2 and coords[0].is_valid_int() \
+				and coords[1].is_valid_int():
+			cell = Vector2i(int(coords[0]), int(coords[1]))
+		else:
+			push_warning("MultiplayerManager: ignoring --build-op '%s' (bad cell)." % spec)
+			continue
+		if kind == "place":
+			var category := StringName(parts[2])
+			if category not in BuildOps.CATEGORIES:
+				push_warning("MultiplayerManager: ignoring --build-op '%s' (bad category)." % spec)
+				continue
+			ops.append({"kind": "place", "cell": cell, "category": category,
+				"object_id": StringName(parts[3]) if parts.size() > 3 else &"standard_block",
+				"rotation": int(parts[4]) if parts.size() > 4 and parts[4].is_valid_int() else 0,
+				"flip": parts.size() > 5 and parts[5] == "1",
+				"done": false})
+		elif kind == "remove":
+			ops.append({"kind": "remove", "cell": cell, "done": false})
+		else:
+			push_warning("MultiplayerManager: ignoring --build-op '%s' (bad kind)." % spec)
+	return ops
 
-## Runs the debug place/remove once, timed after world sync so the
-## request travels the real client->server->broadcast path.
+## Runs the queued debug build ops once each, timed after world sync
+## so requests travel the real client->server->broadcast path.
+## Specs: {"kind": "place"|"remove", "cell": Vector2i, "category",
+## "object_id", "done": bool} — remove auto-detects the topmost
+## occupant via BuildOps.topmost_at, like a real click would.
 func _run_debug_build_ops() -> void:
 	if mode != Mode.CLIENT or not world_synced or _synced_msec < 0:
 		return
@@ -678,22 +787,46 @@ func _run_debug_build_ops() -> void:
 	var player := _local_player()
 	if player == null or player.room == null:
 		return
-	if not _debug_place.is_empty() and not _debug_place["done"] and now >= 2000:
-		_debug_place["done"] = true
-		var ok := request_build_place(player.room.room_coordinates,
-			_debug_place["cell"], _debug_place.get("object_id", &"standard_block"), false)
-		print("MultiplayerManager: debug place -> %s" % ok)
-	if not _debug_remove.is_empty() and not _debug_remove["done"] and now >= 5000:
-		_debug_remove["done"] = true
-		var cell: Vector2i = _debug_remove["cell"]
-		var layer := player.room.block_layer
-		var top := BuildOps.topmost_block(layer, cell) if layer != null else null
-		if top == null or top.block_definition == null:
-			print("MultiplayerManager: debug remove found no plain block at %s." % cell)
-			return
-		var ok := request_build_remove(player.room.room_coordinates, cell,
-			StringName(top.block_id), top.grid_position, top.elevation)
-		print("MultiplayerManager: debug remove -> %s" % ok)
+	for i in range(_debug_ops.size()):
+		var op: Dictionary = _debug_ops[i]
+		if op.get("done", false) or now < 2000 + i * 1500:
+			continue
+		op["done"] = true
+		if String(op.get("kind")) == "place":
+			var ok := request_build_place(player.room.room_coordinates,
+				op["cell"], op.get("category", &"block"),
+				op.get("object_id", &"standard_block"),
+				int(op.get("rotation", 0)), bool(op.get("flip", false)))
+			print("MultiplayerManager: debug place %s -> %s" % [op, ok])
+		else:
+			var cell: Vector2i = op["cell"]
+			var top := BuildOps.topmost_at(player.room, cell)
+			if top.is_empty():
+				print("MultiplayerManager: debug remove found nothing at %s." % cell)
+				continue
+			var category := StringName(str(top.get("category")))
+			var ok := _debug_remove_request(player.room, cell, category, top)
+			print("MultiplayerManager: debug remove %s -> %s" % [op, ok])
+
+func _debug_remove_request(room: Room, cell: Vector2i, category: StringName,
+		top: Dictionary) -> bool:
+	match category:
+		&"block", &"furniture":
+			var block: Block = top["block"]
+			return request_build_remove(room.room_coordinates, cell, category,
+				StringName(block.block_id), block.grid_position, block.elevation,
+				Vector2i.ZERO,
+				block.furniture_rotation_degrees if block is Furniture else 0, false)
+		&"carpet":
+			return request_build_remove(room.room_coordinates, cell, category,
+				(top["carpet"] as CarpetDefinition).object_id,
+				Vector2i.ZERO, float(top["elevation"]), top["anchor"],
+				int(top["rotation"]), bool(top["flip"]))
+		&"tile":
+			return request_build_remove(room.room_coordinates, cell, category,
+				(top["tile"] as TileDefinition).object_id,
+				Vector2i.ZERO, float(top["elevation"]))
+	return false
 
 # ------------------------------------------------------------------
 # RPCs — path-stable: always /root/<Main>/WorldBootstrap/MultiplayerManager

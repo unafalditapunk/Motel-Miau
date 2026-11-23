@@ -115,25 +115,31 @@ func place_at(coordinates: Vector2i) -> bool:
 		return false
 	var net := _net_manager()
 	var net_client := net != null and net.mode == MultiplayerManager.Mode.CLIENT
-	# Phase B1: on a multiplayer client ONLY plain block placement is
-	# synchronized. Tiles, carpets and furniture would mutate the local
-	# replica without server authority — refuse them outright.
-	if net_client and not (definition is BlockDefinition):
-		return false
 	if definition is TileDefinition:
+		if net_client:
+			return net.request_build_place(room.room_coordinates,
+				coordinates, &"tile", definition.object_id)
 		return room.set_cell_tile(coordinates, definition, block_layer.get_top_z_at(coordinates))
 	if definition is CarpetDefinition:
+		if net_client:
+			return net.request_build_place(room.room_coordinates,
+				coordinates, &"carpet", definition.object_id,
+				rotation_degrees, flipped)
 		return room.place_carpet(definition, coordinates, rotation_degrees, flipped, block_layer.get_top_z_at(coordinates))
 	if _is_player_cell(coordinates):
 		return false
 	var elevation := block_layer.get_top_z_at(coordinates)
 	var placed: Block = null
 	if definition is FurnitureDefinition:
+		if net_client:
+			return net.request_build_place(room.room_coordinates,
+				coordinates, &"furniture", definition.object_id,
+				rotation_degrees, flipped)
 		placed = block_layer.place_furniture(definition, coordinates, elevation, rotation_degrees)
 	elif definition is BlockDefinition:
 		if net_client:
 			return net.request_build_place(room.room_coordinates,
-				coordinates, definition.object_id, flipped)
+				coordinates, &"block", definition.object_id, 0, flipped)
 		placed = block_layer.place_block(definition, coordinates, elevation)
 	else:
 		push_error("BlockPlacementController: unsupported definition type for '%s'." % definition.object_id)
@@ -188,21 +194,33 @@ func remove_at(coordinates: Vector2i) -> bool:
 			best_z = carpet_z
 			best_priority = 2
 	if kind == 3:
-		# Carpet removal is not synchronized yet (Phase B1 scope).
-		return not _is_net_client() and room.clear_cell_carpet(coordinates)
+		if _is_net_client():
+			var net := _net_manager()
+			return net != null and net.request_build_remove(
+				room.room_coordinates, coordinates, &"carpet",
+				StringName(cell.carpet.object_id), Vector2i.ZERO,
+				float(cell.carpet_elevation), cell.carpet_anchor,
+				cell.carpet_rotation_degrees, cell.carpet_flip)
+		return room.clear_cell_carpet(coordinates)
 	if kind == 2:
-		# Tile removal is not synchronized yet (Phase B1 scope).
-		return not _is_net_client() and room.clear_cell_tile(coordinates)
+		if _is_net_client():
+			var net := _net_manager()
+			return net != null and net.request_build_remove(
+				room.room_coordinates, coordinates, &"tile",
+				StringName(cell.tile.object_id), Vector2i.ZERO,
+				float(cell.tile_elevation))
+		return room.clear_cell_tile(coordinates)
 	if kind == 1 and top_block != null:
 		if _is_net_client():
-			# Only plain blocks sync; furniture stays local-only for now.
-			if top_block.block_definition == null:
-				return false
+			var is_furniture := top_block is Furniture
 			var net := _net_manager()
 			return net != null and net.request_build_remove(
 				room.room_coordinates, coordinates,
+				&"furniture" if is_furniture else &"block",
 				StringName(top_block.block_id), top_block.grid_position,
-				top_block.elevation)
+				top_block.elevation, Vector2i.ZERO,
+				top_block.furniture_rotation_degrees if is_furniture else 0,
+				false)
 		block_layer.remove_block(top_block)
 		return true
 	return false
@@ -257,11 +275,16 @@ func _is_net_client() -> bool:
 	return net != null and net.mode == MultiplayerManager.Mode.CLIENT
 
 func _is_player_cell(coordinates: Vector2i) -> bool:
-	var player := get_tree().get_first_node_in_group(&"player") as Player
-	if player == null:
-		return false
 	if room != null:
 		coordinates += room.cell_origin
-	if player.room != null:
-		return player.room.world_cell_coordinates(player.grid_position) == coordinates
-	return player.grid_position == coordinates
+	for group_name in [&"player", &"net_avatar"]:
+		for node in get_tree().get_nodes_in_group(group_name):
+			var player := node as Player
+			if player == null:
+				continue
+			if player.room != null:
+				if player.room.world_cell_coordinates(player.grid_position) == coordinates:
+					return true
+			elif player.grid_position == coordinates:
+				return true
+	return false

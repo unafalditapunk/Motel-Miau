@@ -52,9 +52,11 @@ func _process(_delta: float) -> void:
 		valid = layer.can_place_furniture(definition, cell, elevation, rotation_deg)
 	elif definition is BlockDefinition:
 		valid = layer.can_place(definition, cell, elevation)
-	var player := get_tree().get_first_node_in_group(&"player")
-	if player != null and player.room != null and player.room.world_cell_coordinates(player.grid_position) == world_cell:
-		valid = false
+	var footprint_cells := _footprint_world_cells(cell, footprint, room)
+	for world_foot in footprint_cells:
+		if _world_cell_has_player(world_foot):
+			valid = false
+			break
 
 	visible = true
 	_sprite.scale = Vector2.ONE
@@ -64,6 +66,27 @@ func _process(_delta: float) -> void:
 	_sprite.flip_h = _controller.flipped
 	_sprite.modulate = VALID_COLOR if valid else INVALID_COLOR
 	position = layer._footprint_screen_position(footprint, world_cell, elevation)
+
+func _footprint_world_cells(cell: Vector2i, footprint: Vector2i, room: Room) -> Array[Vector2i]:
+	var cells: Array[Vector2i] = []
+	var origin := cell + room.cell_origin
+	for x in footprint.x:
+		for y in footprint.y:
+			cells.append(origin + Vector2i(x, y))
+	return cells
+
+func _world_cell_has_player(world_cell: Vector2i) -> bool:
+	for group_name in [&"player", &"net_avatar"]:
+		for node in get_tree().get_nodes_in_group(group_name):
+			var player := node as Player
+			if player == null:
+				continue
+			var player_cell := player.grid_position
+			if player.room != null:
+				player_cell = player.room.world_cell_coordinates(player.grid_position)
+			if player_cell == world_cell:
+				return true
+	return false
 
 func _show_carpet(definition: CarpetDefinition, cell: Vector2i, room: Room, layer: BlockLayer) -> void:
 	visible = true
