@@ -30,6 +30,7 @@ TESTS=(
     FloorSmokeTest
     FloorPersistenceSmokeTest
     FloorPanelSmokeTest
+    FloorManagementSmokeTest
     CreationModeSmokeTest
     TileSmokeTest
     CarpetSmokeTest

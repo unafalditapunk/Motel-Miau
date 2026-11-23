@@ -37,6 +37,7 @@ func _ready() -> void:
 	# Always scan: register_floor() deduplicates, so floors registered
 	# manually before _ready coexist with resource-loaded ones.
 	_load_floor_resources()
+	_load_saved_floor_definitions()
 
 func _load_floor_resources() -> void:
 	var dir := DirAccess.open(FLOORS_DIR)
@@ -48,6 +49,39 @@ func _load_floor_resources() -> void:
 		var resource := ResourceLoader.load(FLOORS_DIR.path_join(file_name))
 		if resource is Floor:
 			register_floor(resource)
+
+## Registers floors created at runtime in a previous session. Their
+## definitions live in user://floors/<id>/floor_def.json; res://
+## resources are never written. A saved definition whose id collides
+## with a shipped floor is rejected by register_floor — user data can
+## never shadow built-in content.
+func _load_saved_floor_definitions() -> void:
+	for data in FloorSaveSystem.load_floor_definitions():
+		var floor_def := _floor_from_saved_data(data)
+		if floor_def != null:
+			register_floor(floor_def)
+
+## Rebuilds a Floor resource from a parsed floor_def.json dictionary.
+## Room specs/entry/spawn reuse the layout-entry parser; connections
+## come back through FloorSaveSystem.connection_from_dict.
+func _floor_from_saved_data(data: Dictionary) -> Floor:
+	var floor_id := StringName(str(data.get("floor_id", "")))
+	if floor_id == &"":
+		push_warning("FloorManager: saved floor definition has no floor_id; ignoring.")
+		return null
+	var floor_def := Floor.new()
+	floor_def.floor_id = floor_id
+	floor_def.display_name = str(data.get("display_name", ""))
+	floor_def.auto_connect_adjacent = bool(data.get("auto_connect_adjacent", true))
+	var metadata: Variant = data.get("metadata")
+	if metadata is Dictionary:
+		floor_def.metadata = metadata
+	_apply_layout_entries(floor_def, data)
+	for raw in data.get("connections", []):
+		var connection := FloorSaveSystem.connection_from_dict(raw)
+		if connection != null:
+			floor_def.connections.append(connection)
+	return floor_def
 
 # ------------------------------------------------------------------
 # Floor registry
@@ -91,6 +125,91 @@ func unregister_floor(floor_id: StringName) -> bool:
 	floors.erase(floor_def)
 	if active_floor == floor_def:
 		active_floor = null
+	return true
+
+## Creates a new floor: unique id, display name, initial room specs,
+## and its own user:// save directory (floor_def.json — res:// is
+## never written). An empty spec list gets a single default 8x8 room
+## so the floor is immediately enterable. Entry/spawn default to the
+## first spec's room center. Returns the Floor, or null when the id
+## is unusable/duplicate or the layout fails validation.
+func create_floor(floor_id: StringName, display_name := "", room_specs: Array[FloorRoomSpec] = [], auto_connect := true) -> Floor:
+	if FloorSaveSystem.floor_dir(floor_id).is_empty():
+		push_error("FloorManager.create_floor: id '%s' cannot be used as a save directory." % floor_id)
+		return null
+	if has_floor(floor_id):
+		push_error("FloorManager already has floor '%s'." % floor_id)
+		return null
+	var specs: Array[FloorRoomSpec] = []
+	for spec in room_specs:
+		if spec != null:
+			specs.append(spec)
+	if specs.is_empty():
+		var spec := FloorRoomSpec.new()
+		spec.room_id = Vector2i.ZERO
+		spec.global_origin = Vector2i.ZERO
+		spec.size = Vector2i(8, 8)
+		specs.append(spec)
+	var floor_def := Floor.new()
+	floor_def.floor_id = floor_id
+	floor_def.display_name = display_name if not display_name.is_empty() else String(floor_id)
+	floor_def.auto_connect_adjacent = auto_connect
+	floor_def.rooms = specs
+	var first := specs[0]
+	floor_def.entry_room_id = first.room_id
+	var first_size := _resolved_spec_size(first)
+	floor_def.spawn_position = Vector2i(first_size.x >> 1, first_size.y >> 1) \
+		if first_size != Vector2i.ZERO else Vector2i.ZERO
+	var problems := validate_floor(floor_def)
+	if not problems.is_empty():
+		push_error("FloorManager.create_floor: floor '%s' is invalid: %s" % [floor_id, ", ".join(problems)])
+		return null
+	if not register_floor(floor_def):
+		return null
+	var error := FloorSaveSystem.save_floor_definition(floor_def)
+	if error != OK:
+		push_error("FloorManager.create_floor: floor registered but definition save failed (error %d)." % error)
+		unregister_floor(floor_id)
+		return null
+	return floor_def
+
+## Reports whether a floor may be deleted. Returns
+## {"allowed": bool, "reason": String}. A floor is deletable when it is
+## registered and is not the last remaining floor; deleting the active
+## floor is allowed — delete_floor() travels elsewhere first.
+func can_delete_floor(floor_id: StringName) -> Dictionary:
+	var refuse := func(reason: String) -> Dictionary:
+		return {"allowed": false, "reason": reason}
+	if get_floor(floor_id) == null:
+		return refuse.call("Floor is not registered.")
+	if floors.size() <= 1:
+		return refuse.call("Cannot delete the last floor.")
+	return {"allowed": true, "reason": ""}
+
+## Deletes a floor: when it is active the manager first travels to
+## another floor (saving the outgoing state and rebuilding the world,
+## so no stale room/player references remain), then unregisters the
+## definition and removes its entire save directory. A failed switch
+## aborts the delete with everything untouched.
+func delete_floor(floor_id: StringName) -> bool:
+	var verdict := can_delete_floor(floor_id)
+	if not verdict.get("allowed", false):
+		push_error("FloorManager.delete_floor: %s" % verdict.get("reason", "refused"))
+		return false
+	var floor_def := get_floor(floor_id)
+	if active_floor == floor_def:
+		var fallback: Floor = null
+		for other in floors:
+			if other != floor_def:
+				fallback = other
+				break
+		if fallback == null or not switch_floor(fallback.floor_id):
+			push_error("FloorManager.delete_floor: could not leave floor '%s'; delete aborted." % floor_id)
+			return false
+	unregister_floor(floor_id)
+	var error := FloorSaveSystem.delete_floor_save(floor_id)
+	if error != OK:
+		push_warning("FloorManager.delete_floor: floor unregistered but save data removal failed (error %d)." % error)
 	return true
 
 ## Human-readable layout problems for a floor definition. Empty means

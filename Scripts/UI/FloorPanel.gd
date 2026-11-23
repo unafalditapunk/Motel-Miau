@@ -32,6 +32,10 @@ var panel_open := false:
 var _root: PanelContainer
 var _list_box: VBoxContainer
 var _status_label: Label
+var _new_floor_button: Button
+var _create_box: VBoxContainer
+var _id_edit: LineEdit
+var _name_edit: LineEdit
 ## Live row/button references per floor id, rebuilt with the list.
 ## queue_free'd rows linger until end of frame, so tree searches can
 ## return stale duplicates; these maps always point at current nodes.
@@ -155,6 +159,18 @@ func _make_floor_row(manager: FloorManager, floor_def: Floor) -> Control:
 	PixelUi.nearest(enter)
 	enter.pressed.connect(_on_enter_pressed.bind(floor_def.floor_id))
 	hbox.add_child(enter)
+
+	var del := Button.new()
+	del.name = "DeleteButton"
+	del.text = "Del"
+	del.custom_minimum_size = Vector2(40.0, 24.0)
+	# The last remaining floor can never be deleted.
+	del.disabled = manager.floors.size() <= 1
+	del.set_meta(&"floor_id", floor_def.floor_id)
+	PixelUi.style_button(del, true)
+	PixelUi.nearest(del)
+	del.pressed.connect(_on_delete_pressed.bind(floor_def.floor_id))
+	hbox.add_child(del)
 	_floor_rows[floor_def.floor_id] = row
 	_enter_buttons[floor_def.floor_id] = enter
 	return row
@@ -193,6 +209,53 @@ func _on_enter_pressed(floor_id: StringName) -> void:
 	else:
 		_set_status("Could not enter '%s'. See console for details." % floor_id, true)
 		_rebuild_list()
+
+func _on_delete_pressed(floor_id: StringName) -> void:
+	var manager := _resolve_floor_manager()
+	if manager == null:
+		_set_status("No FloorManager available.", true)
+		return
+	if manager.delete_floor(floor_id):
+		_set_status("Deleted floor '%s'." % floor_id, false)
+	else:
+		_set_status("Could not delete '%s'. See console for details." % floor_id, true)
+	_rebuild_list()
+
+func _on_new_floor_pressed() -> void:
+	_create_box.visible = not _create_box.visible
+
+func _on_create_floor_pressed() -> void:
+	var manager := _resolve_floor_manager()
+	if manager == null:
+		_set_status("No FloorManager available.", true)
+		return
+	var id_text := _id_edit.text.strip_edges()
+	if id_text.is_empty():
+		_set_status("Floor id is required.", true)
+		return
+	var floor_def := manager.create_floor(StringName(id_text), _name_edit.text.strip_edges())
+	if floor_def == null:
+		_set_status("Could not create floor '%s'. See console for details." % id_text, true)
+	else:
+		_set_status("Created floor '%s'." % floor_def.floor_id, false)
+		_id_edit.text = ""
+		_name_edit.text = ""
+		_create_box.visible = false
+	_rebuild_list()
+
+func _make_line_edit(placeholder: String) -> LineEdit:
+	var edit := LineEdit.new()
+	edit.placeholder_text = placeholder
+	edit.custom_minimum_size = Vector2(0.0, 22.0)
+	edit.add_theme_color_override(&"font_color", PixelUi.TEXT_COLOR)
+	edit.add_theme_color_override(&"font_placeholder_color", PixelUi.TEXT_DIM)
+	edit.add_theme_color_override(&"caret_color", PixelUi.TEXT_COLOR)
+	edit.add_theme_stylebox_override(&"normal",
+		PixelUi.make_panel_stylebox(Color(0.05, 0.05, 0.1, 0.9), PixelUi.BUTTON_BORDER))
+	edit.add_theme_stylebox_override(&"focus",
+		PixelUi.make_panel_stylebox(Color(0.08, 0.07, 0.14, 0.95), PixelUi.PANEL_BORDER))
+	PixelUi.nearest(edit)
+	return edit
 
 func _set_status(text: String, is_error: bool) -> void:
 	_status_label.text = text
@@ -244,6 +307,44 @@ func _build_ui() -> void:
 	_list_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_list_box.add_theme_constant_override(&"separation", 4)
 	scroll.add_child(_list_box)
+
+	_new_floor_button = Button.new()
+	_new_floor_button.text = "New Floor"
+	_new_floor_button.custom_minimum_size = Vector2(0.0, 24.0)
+	PixelUi.style_button(_new_floor_button)
+	PixelUi.nearest(_new_floor_button)
+	_new_floor_button.pressed.connect(_on_new_floor_pressed)
+	vbox.add_child(_new_floor_button)
+
+	_create_box = VBoxContainer.new()
+	_create_box.visible = false
+	_create_box.add_theme_constant_override(&"separation", 4)
+	vbox.add_child(_create_box)
+
+	_id_edit = _make_line_edit("floor_id (e.g. attic)")
+	_create_box.add_child(_id_edit)
+	_name_edit = _make_line_edit("Display name (optional)")
+	_create_box.add_child(_name_edit)
+
+	var create_row := HBoxContainer.new()
+	create_row.add_theme_constant_override(&"separation", 4)
+	_create_box.add_child(create_row)
+
+	var create_button := Button.new()
+	create_button.text = "Create"
+	create_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	PixelUi.style_button(create_button)
+	PixelUi.nearest(create_button)
+	create_button.pressed.connect(_on_create_floor_pressed)
+	create_row.add_child(create_button)
+
+	var cancel_button := Button.new()
+	cancel_button.text = "Cancel"
+	cancel_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	PixelUi.style_button(cancel_button)
+	PixelUi.nearest(cancel_button)
+	cancel_button.pressed.connect(func() -> void: _create_box.visible = false)
+	create_row.add_child(cancel_button)
 
 	_status_label = Label.new()
 	_status_label.text = ""

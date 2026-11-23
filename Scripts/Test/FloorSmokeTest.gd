@@ -11,6 +11,7 @@ const BLOCK_CATALOG_PATH := "res://Resources/BlockCatalog.tres"
 const FURNITURE_CATALOG_PATH := "res://Resources/FurnitureCatalog.tres"
 const CARPET_CATALOG_PATH := "res://Resources/CarpetCatalog.tres"
 const BLOCK_SCENE_PATH := "res://Scenes/Objects/Block.tscn"
+const SCRATCH_ROOT := "user://smoke_floor_smoke"
 
 var _floor_manager: FloorManager
 var _room_world: RoomWorld
@@ -18,6 +19,10 @@ var _frames := 0
 var _failures: Array[String] = []
 
 func _initialize() -> void:
+	# User-created floors persist under FloorSaveSystem.save_root; point
+	# it at a scratch dir so real user floors never leak into this test.
+	FloorSaveSystem.save_root = SCRATCH_ROOT
+	_remove_dir_contents(SCRATCH_ROOT)
 	_floor_manager = FloorManager.new()
 	_floor_manager.name = "FloorManager"
 	root.add_child(_floor_manager)
@@ -67,6 +72,16 @@ func _process(_delta: float) -> bool:
 	_report()
 	quit()
 	return true
+
+func _remove_dir_contents(path: String) -> void:
+	var dir := DirAccess.open(path)
+	if dir == null:
+		return
+	for file_name in dir.get_files():
+		dir.remove(file_name)
+	for sub in dir.get_directories():
+		_remove_dir_contents(path.path_join(sub))
+		DirAccess.remove_absolute(path.path_join(sub))
 
 func _expect(condition: bool, message: String) -> void:
 	if not condition:

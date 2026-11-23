@@ -21,6 +21,7 @@ extends RefCounted
 static var save_root := "user://floors"
 const MANIFEST_NAME := "floor.json"
 const LAYOUT_NAME := "layout.json"
+const FLOOR_DEF_NAME := "floor_def.json"
 const VERSION := 1
 
 # ------------------------------------------------------------------
@@ -42,6 +43,10 @@ static func manifest_path(floor_id: StringName) -> String:
 static func layout_path(floor_id: StringName) -> String:
 	var dir := floor_dir(floor_id)
 	return "" if dir.is_empty() else dir.path_join(LAYOUT_NAME)
+
+static func floor_def_path(floor_id: StringName) -> String:
+	var dir := floor_dir(floor_id)
+	return "" if dir.is_empty() else dir.path_join(FLOOR_DEF_NAME)
 
 ## Rejects ids that are empty, dot-relative, or contain characters that
 ## are unsafe in directory names.
@@ -245,3 +250,152 @@ static func load_layout(floor_id: StringName) -> Dictionary:
 		"entry_room_id": data.get("entry_room_id"),
 		"spawn_position": data.get("spawn_position"),
 	}
+
+# ------------------------------------------------------------------
+# Floor definitions (user-created floors)
+# ------------------------------------------------------------------
+##
+## Shipped floors are res:// .tres resources that must never be written
+## at runtime. Floors created through FloorManager.create_floor() keep
+## their full definition in user://floors/<id>/floor_def.json instead —
+## self-contained (specs, entry/spawn, connections, metadata) so a
+## created floor survives restarts without any res:// change. The file
+## reuses the layout.json spec shape plus floor-level fields.
+
+## Writes the floor's complete definition. Returns the write Error.
+static func save_floor_definition(floor_def: Floor) -> Error:
+	if floor_def == null:
+		push_error("FloorSaveSystem.save_floor_definition requires a Floor.")
+		return ERR_INVALID_PARAMETER
+	var dir := floor_dir(floor_def.floor_id)
+	if dir.is_empty():
+		push_error("FloorSaveSystem: floor id '%s' cannot be used as a save directory." % floor_def.floor_id)
+		return ERR_INVALID_PARAMETER
+	if DirAccess.make_dir_recursive_absolute(dir) != OK:
+		push_error("FloorSaveSystem could not create floor save dir '%s'." % dir)
+		return ERR_CANT_CREATE
+	var data := layout_data(floor_def)
+	data["display_name"] = floor_def.display_name
+	data["auto_connect_adjacent"] = floor_def.auto_connect_adjacent
+	data["metadata"] = floor_def.metadata
+	var connections: Array = []
+	for connection in floor_def.connections:
+		if connection != null:
+			connections.append(connection_to_dict(connection))
+	data["connections"] = connections
+	var path := dir.path_join(FLOOR_DEF_NAME)
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		push_error("FloorSaveSystem could not open '%s': %s" % [path, error_string(FileAccess.get_open_error())])
+		return FileAccess.get_open_error()
+	file.store_string(JSON.stringify(data, "\t"))
+	file.close()
+	return OK
+
+## Loads every stored floor definition under save_root. Returns an
+## Array of raw Dictionaries (the parsed floor_def.json contents,
+## including "floor_id"); FloorManager turns them into Floor
+## resources. Unreadable or malformed files are skipped with a
+## warning — a bad definition never blocks boot.
+static func load_floor_definitions() -> Array:
+	var defs: Array = []
+	var root := DirAccess.open(save_root)
+	if root == null:
+		return defs
+	for dir_name in root.get_directories():
+		var path := save_root.path_join(dir_name).path_join(FLOOR_DEF_NAME)
+		if not FileAccess.file_exists(path):
+			continue
+		var file := FileAccess.open(path, FileAccess.READ)
+		if file == null:
+			push_warning("FloorSaveSystem could not open floor definition '%s': %s" % [
+				path, error_string(FileAccess.get_open_error())])
+			continue
+		var parsed: Variant = JSON.parse_string(file.get_as_text())
+		file.close()
+		if parsed is Dictionary and (parsed as Dictionary).get("floor_id") != null:
+			defs.append(parsed)
+		else:
+			push_warning("FloorSaveSystem floor definition '%s' is not valid JSON; ignoring." % path)
+	return defs
+
+## Removes a floor's entire save directory (manifest, layout,
+## definition, room states, connections, player state). Returns OK
+## when nothing existed. Used by FloorManager.delete_floor after the
+## floor has been unregistered.
+static func delete_floor_save(floor_id: StringName) -> Error:
+	var dir := floor_dir(floor_id)
+	if dir.is_empty():
+		return ERR_INVALID_PARAMETER
+	if not DirAccess.dir_exists_absolute(dir):
+		return OK
+	return _remove_dir_recursive(dir)
+
+static func _remove_dir_recursive(path: String) -> Error:
+	var dir := DirAccess.open(path)
+	if dir == null:
+		return DirAccess.get_open_error()
+	for file_name in dir.get_files():
+		var error := DirAccess.remove_absolute(path.path_join(file_name))
+		if error != OK:
+			return error
+	for sub in dir.get_directories():
+		var error := _remove_dir_recursive(path.path_join(sub))
+		if error != OK:
+			return error
+	# remove_absolute also removes empty directories.
+	return DirAccess.remove_absolute(path)
+
+# ------------------------------------------------------------------
+# RoomConnection serialization (floor definitions only)
+# ------------------------------------------------------------------
+
+static func connection_to_dict(connection: RoomConnection) -> Dictionary:
+	return {
+		"connection_id": String(connection.connection_id),
+		"type": RoomConnection.type_key(connection.connection_type),
+		"source_room_id": [connection.source_room_id.x, connection.source_room_id.y],
+		"destination_room_id": [connection.destination_room_id.x, connection.destination_room_id.y],
+		"source_cells": _cell_array_to_arrays(connection.source_cells),
+		"destination_cells": _cell_array_to_arrays(connection.destination_cells),
+		"interactive": connection.interactive,
+		"bidirectional": connection.bidirectional,
+		"marker_texture": connection.marker_texture.resource_path if connection.marker_texture != null else "",
+	}
+
+static func connection_from_dict(data: Variant) -> RoomConnection:
+	if not (data is Dictionary):
+		return null
+	var dict: Dictionary = data
+	var connection := RoomConnection.new()
+	connection.connection_id = StringName(str(dict.get("connection_id", "")))
+	connection.connection_type = RoomConnection.type_from_key(str(dict.get("type", "door"))) as RoomConnection.ConnectionType
+	connection.source_room_id = _dict_vec2i(dict.get("source_room_id"))
+	connection.destination_room_id = _dict_vec2i(dict.get("destination_room_id"))
+	connection.source_cells = _dict_cell_array(dict.get("source_cells"))
+	connection.destination_cells = _dict_cell_array(dict.get("destination_cells"))
+	connection.interactive = bool(dict.get("interactive", false))
+	connection.bidirectional = bool(dict.get("bidirectional", true))
+	var texture_path := str(dict.get("marker_texture", ""))
+	if not texture_path.is_empty() and ResourceLoader.exists(texture_path):
+		connection.marker_texture = ResourceLoader.load(texture_path) as Texture2D
+	return connection
+
+static func _cell_array_to_arrays(cells: Array) -> Array:
+	var result: Array = []
+	for cell in cells:
+		if cell is Vector2i:
+			result.append([(cell as Vector2i).x, (cell as Vector2i).y])
+	return result
+
+static func _dict_vec2i(value: Variant) -> Vector2i:
+	if value is Array and (value as Array).size() >= 2:
+		return Vector2i(int(value[0]), int(value[1]))
+	return Vector2i.ZERO
+
+static func _dict_cell_array(value: Variant) -> Array[Vector2i]:
+	var cells: Array[Vector2i] = []
+	if value is Array:
+		for entry in value:
+			cells.append(_dict_vec2i(entry))
+	return cells

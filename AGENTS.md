@@ -138,7 +138,11 @@ write to the real `user://saves`.
   CanvasLayer created by WorldBootstrap) toggles with F7, lists every
   registered floor dynamically (name, id, room count, grid layout,
   saved/new, ACTIVE badge) with an Enter button per row that calls
-  `FloorManager.switch_floor` — no save/load logic in the UI. While open,
+  `FloorManager.switch_floor` — no save/load logic in the UI. The
+  "New Floor" button reveals a small form (id + optional display name)
+  calling `FloorManager.create_floor`; each row also has a Del button
+  calling `FloorManager.delete_floor` (disabled on the last floor).
+  While open,
   `FloorPanel.any_open(tree)` blocks Player movement
   (`request_move`/`_start_move`/held-key input) and
   BlockPlacementController input; F3/F5/F6/Q keep working. The panel
@@ -225,6 +229,23 @@ write to the real `user://saves`.
   and restores them when validation refuses the load, so invalid
   layouts never poison the in-memory Floor. Corrupt/missing layout =
   ignored with a warning, never fatal.
+- Floor management (create/delete): `FloorManager.create_floor(id,
+  name, specs, auto_connect)` builds a Floor in memory, validates it,
+  registers it, and persists the full definition to
+  `user://floors/<id>/floor_def.json` via
+  `FloorSaveSystem.save_floor_definition` — self-contained (specs,
+  entry/spawn, connections, metadata) since res:// is never written.
+  Empty spec lists get a default 8x8 room. `_ready` also calls
+  `_load_saved_floor_definitions()`, which rebuilds Floors from every
+  floor_def.json under `FloorSaveSystem.save_root` (duplicate ids
+  lose to shipped res:// floors via register_floor). Connections
+  round-trip through `FloorSaveSystem.connection_to_dict/from_dict`.
+  `can_delete_floor`/`delete_floor` refuse unknown ids and the last
+  remaining floor; deleting the ACTIVE floor first `switch_floor`s to
+  a fallback (saving outgoing state, rebuilding the world) so no stale
+  references remain, then `unregister_floor` +
+  `FloorSaveSystem.delete_floor_save` (recursive dir removal) drops
+  all its data.
 - Neighborhood: the visible set is the primary room plus rooms within
   `spatial_neighborhood_depth` BFS hops of bounds adjacency (a room's
   `global_bounds()` grown by `neighborhood_padding` world cells must
@@ -282,28 +303,47 @@ write to the real `user://saves`.
   diff the WORLD_DUMP lines to verify replication. `SeedFloorSave.gd`
   (`-s` script) writes a real motel save with chosen blocks/carpets
   into a `--root` dir for live tests.
-- Build ops (Phase B1): plain block place/remove is server-authoritative.
-  `BuildOps` (`Scripts/Net/`, static) holds the shared rules:
-  `validate_place`/`validate_remove` (room exists, `has_footprint_cell`,
-  server-recomputed `get_top_z_at` elevation, `BlockLayer.can_place`,
-  player occupancy across ALL player bodies' world cells and the whole
-  footprint, stale-target check for removes, furniture = "unsupported")
-  and `apply_place`/`apply_remove`/`topmost_block`/`find_block`.
-  Clients route `BlockPlacementController.place_at`/`remove_at` through
-  `MultiplayerManager.request_build_place/remove` (gated on
-  `can_request_build()` = CLIENT + connected + world_synced); tiles,
-  carpets and furniture are refused on clients until their phase.
+- Build ops (Phase B1+B2): block, furniture, carpet and tile
+  place/remove are all server-authoritative. `BuildOps`
+  (`Scripts/Net/`, static) holds the shared rules: B1's
+  `validate_place`/`validate_remove`/`apply_place`/`apply_remove` for
+  plain blocks, plus the category-dispatching
+  `validate_place_any`/`validate_remove_any`/`apply_place_any`/
+  `apply_remove_any`/`topmost_at` used for every category. Validation
+  mirrors the single-player rules per category: furniture uses
+  `can_place_furniture` + rotated footprint + player occupancy;
+  carpets use `Room.can_place_carpet` (no player check, like SP);
+  tiles need only an existing cell; elevations are always recomputed
+  server-side via `get_top_z_at`. Removal picks the topmost occupant
+  by z-then-priority (block-layer 0 < tile 1 < carpet 2, same rule as
+  `remove_at`) and verifies the request's category + identity
+  (block/furniture: id+pos+elev[+rotation]; carpet: id+anchor+rotation
+  +flip; tile: id+elev) — mismatches reject as `target_changed`.
+  Player occupancy: block/furniture place checks every footprint
+  cell; all removes check occupied cells (blocks) or the clicked
+  cell (carpet/tile), across ALL player bodies.
+  Clients route `BlockPlacementController.place_at`/`remove_at`
+  through `MultiplayerManager.request_build_place/remove` (gated on
+  `can_request_build()` = CLIENT + connected + world_synced).
   Wire: `_rpc_build_place/remove` (any_peer, reliable) carry op_id +
-  room-local cell + object_id (+flip) or target block identity; server
-  dedups per-peer op ids (`_claim_build_op`, 32-entry window), rejects
-  to sender only via `_rpc_build_result(false, reason)`, applies once,
-  then broadcasts `_rpc_build_result(true, payload)` to all clients —
-  clients reproduce via `BuildOps.apply_*` with no re-request.
+  a request Dictionary (room_id, cell, category, object_id, rotation,
+  flip, and remove-identity fields pos/elev/anchor); server dedups
+  per-peer op ids (`_claim_build_op` keeps the highest id seen per
+  peer — client ids are monotonic, so replays are rejected forever,
+  not just within a window), rejects to sender only via
+  `_rpc_build_result(false, reason)`, applies once, then broadcasts
+  `_rpc_build_result(true, payload)` to all clients — clients
+  reproduce via `BuildOps.apply_*_any` with no re-request (a failed
+  local apply pushes a divergence warning). Request fields are
+  coerced via `BuildOps.req_int/req_float/req_bool` — raw
+  int()/float()/bool() on Variant RPC data can abort a handler.
   `build_result` signal is the UI feedback hook. Debug args:
-  `--build-place=x,y:id` / `--build-remove=x,y` fire once ~2 s/5 s
-  after sync for headless live tests; `--dump-world=N` delays the
-  WORLD_DUMP by N seconds. Known limits: furniture/carpet/tile mutations
-  still local-only (refused on clients), no floor-switch/room
-  create-delete sync (Phase C), server persistence/autosave deferred
-  (Phase D) — the dedicated server still skips save-on-exit; movement
-  has no interpolation; no auth/encryption.
+  `--build-op=place:x,y:category:id[:rot[:flip]]` (repeatable) and
+  `--build-op=remove:x,y` (auto-detects topmost) fire 2 s + 1.5 s·i
+  after sync; legacy `--build-place/--build-remove` still parse;
+  `--dump-world=N` delays the WORLD_DUMP by N seconds and now lists
+  explicit tile overrides and carpet anchors per room. Known limits:
+  no floor-switch/room create-delete sync (Phase C), server
+  persistence/autosave deferred (Phase D) — the dedicated server
+  still skips save-on-exit; movement has no interpolation; no
+  auth/encryption.
