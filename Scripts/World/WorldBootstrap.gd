@@ -44,6 +44,9 @@ var carpet_layer: CarpetLayer
 var _debug_hud: DebugHud
 var _floor_panel: FloorPanel
 var _floor_editor: FloorEditor
+var _net_manager: MultiplayerManager
+## Launch args parsed once in _ready; empty dict = single-player.
+var _net_args := {}
 var _quarantine_armed_msec := -1
 
 func _ready() -> void:
@@ -58,6 +61,12 @@ func _ready() -> void:
 		push_error("WorldBootstrap is missing required catalogs or scenes.")
 		return
 
+	# --saves=<dir> redirects floor saves (dev/test isolation); parsed
+	# here because it applies to single-player too, not just net modes.
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--saves="):
+			FloorSaveSystem.save_root = arg.get_slice("=", 1)
+
 	floor_manager = FloorManager.new()
 	floor_manager.name = "FloorManager"
 	floor_manager.room_world = room_world
@@ -65,13 +74,19 @@ func _ready() -> void:
 	add_child(floor_manager)
 
 	_configure_room_world()
+	_net_args = MultiplayerManager.parse_args(OS.get_cmdline_user_args())
+	var net_client := int(_net_args.get("mode", -1)) == MultiplayerManager.Mode.CLIENT
 	# Floor-first boot: when a startup floor is configured the world is
 	# materialized entirely from Floor specs — no legacy room
 	# registration runs. Falls back to the legacy room if the floor is
-	# missing or fails to load.
+	# missing or fails to load. Multiplayer CLIENTS boot without local
+	# saves/layout: the authoritative world arrives via WorldSnapshot.
 	var floor_ready := false
 	if startup_floor_id != &"" and floor_manager.has_floor(startup_floor_id):
-		floor_ready = floor_manager.load_floor(startup_floor_id)
+		if net_client:
+			floor_ready = floor_manager.load_floor_without_save(startup_floor_id)
+		else:
+			floor_ready = floor_manager.load_floor(startup_floor_id)
 		if not floor_ready:
 			push_warning("WorldBootstrap: startup floor '%s' failed to load; falling back to the legacy room." % startup_floor_id)
 	if floor_ready:
@@ -84,9 +99,12 @@ func _ready() -> void:
 	_configure_room_layers()
 	_spawn_player()
 	# load_floor ran before the player existed, so saved player state was
-	# skipped; apply it now that the player node is spawned.
+	# skipped; apply it now that the player node is spawned. Net clients
+	# skip this: their position comes from the server spawn handshake,
+	# and local player_state.json is stale replica data.
 	if floor_ready:
-		room_world.apply_saved_player_state()
+		if not net_client:
+			room_world.apply_saved_player_state()
 		if player != null and player.room != null and player.room != room:
 			room = player.room
 			_configure_room_layers()
@@ -94,12 +112,19 @@ func _ready() -> void:
 	_build_floor_panel()
 	_build_floor_editor()
 	_wire_placement_controller()
+	_setup_multiplayer()
 
 func _exit_tree() -> void:
+	# A dedicated server is world state, not a player — never let it
+	# write to the local save directory on shutdown.
+	if _net_manager != null and _net_manager.dedicated_server:
+		return
 	save_game()
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+		if _net_manager != null and _net_manager.dedicated_server:
+			return
 		save_game()
 
 func _configure_room_world() -> void:
@@ -170,6 +195,16 @@ func _build_floor_editor() -> void:
 	_floor_editor.name = "FloorEditor"
 	room_world.add_child(_floor_editor)
 
+## Multiplayer prototype: only instantiated when launch args ask for
+## it (--server / --client). No args = pure single-player, zero cost.
+func _setup_multiplayer() -> void:
+	if _net_args.is_empty():
+		return
+	_net_manager = MultiplayerManager.new()
+	_net_manager.name = "MultiplayerManager"
+	add_child(_net_manager)
+	_net_manager.setup(self, _net_args)
+
 func _wire_placement_controller() -> void:
 	var selector := get_node_or_null(^"BuildingSelector") as BuildingSelector
 	if placement_controller != null:
@@ -232,13 +267,25 @@ func _on_load_requested() -> void:
 ## Saves every registered room, the connection graph, and the player state.
 ## When a floor is active the save is floor-scoped (user://floors/<id>/);
 ## otherwise the legacy world saves to the shared RoomSaveSystem dir.
+## True on a multiplayer client: the world is a server replica, so all
+## local world persistence is disabled — clients must never write
+## shared world state to their own user:// saves.
+func _net_client_readonly() -> bool:
+	return _net_manager != null \
+		and _net_manager.mode == MultiplayerManager.Mode.CLIENT
+
 func save_game() -> void:
+	if _net_client_readonly():
+		return
 	if floor_manager != null and floor_manager.active_floor != null:
 		floor_manager.save_active_floor()
 	elif room_world != null:
 		room_world.save_all_rooms()
 
 func load_game() -> void:
+	# F6 on a client would hydrate stale local saves over the replica.
+	if _net_client_readonly():
+		return
 	if floor_manager != null and floor_manager.active_floor != null:
 		floor_manager.load_floor(floor_manager.active_floor.floor_id)
 	elif room_world != null:
@@ -247,6 +294,10 @@ func load_game() -> void:
 ## Public entry point for floor switching (future floor UI). Returns
 ## false without side effects when the switch could not complete.
 func switch_floor(floor_id: StringName) -> bool:
+	# Floor switching is not synchronized yet (Phase C); a client must
+	# not rebuild its replica from local saves.
+	if _net_client_readonly():
+		return false
 	return floor_manager != null and floor_manager.switch_floor(floor_id)
 
 ## Rebinds every room-scoped reference after the active floor changed.

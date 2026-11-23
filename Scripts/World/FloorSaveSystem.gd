@@ -159,18 +159,10 @@ static func _is_int_like(value: Variant) -> bool:
 ## standard room_*.json files — this is a definition overlay, not a
 ## second serializer.
 
-## Writes the floor's current room specs as its layout override.
-static func save_layout(floor_def: Floor) -> Error:
-	if floor_def == null:
-		push_error("FloorSaveSystem.save_layout requires a Floor.")
-		return ERR_INVALID_PARAMETER
-	var dir := floor_dir(floor_def.floor_id)
-	if dir.is_empty():
-		push_error("FloorSaveSystem: floor id '%s' cannot be used as a save directory." % floor_def.floor_id)
-		return ERR_INVALID_PARAMETER
-	if DirAccess.make_dir_recursive_absolute(dir) != OK:
-		push_error("FloorSaveSystem could not create floor save dir '%s'." % dir)
-		return ERR_CANT_CREATE
+## The layout override as a Dictionary (same shape load_layout
+## returns): room specs plus entry/spawn. save_layout() writes this;
+## the multiplayer snapshot path sends it over the wire instead.
+static func layout_data(floor_def: Floor) -> Dictionary:
 	var entries: Array = []
 	for spec in floor_def.rooms:
 		if spec == null:
@@ -192,19 +184,33 @@ static func save_layout(floor_def: Floor) -> Error:
 				sections.append([section.position.x, section.position.y, section.size.x, section.size.y])
 			entry["sections"] = sections
 		entries.append(entry)
-	var path := dir.path_join(LAYOUT_NAME)
-	var file := FileAccess.open(path, FileAccess.WRITE)
-	if file == null:
-		push_error("FloorSaveSystem could not open '%s': %s" % [path, error_string(FileAccess.get_open_error())])
-		return FileAccess.get_open_error()
-	file.store_string(JSON.stringify({
+	return {
 		"version": VERSION,
 		"floor_save": true,
 		"floor_id": String(floor_def.floor_id),
 		"entry_room_id": [floor_def.entry_room_id.x, floor_def.entry_room_id.y],
 		"spawn_position": [floor_def.spawn_position.x, floor_def.spawn_position.y],
 		"rooms": entries,
-	}, "\t"))
+	}
+
+## Writes the floor's current room specs as its layout override.
+static func save_layout(floor_def: Floor) -> Error:
+	if floor_def == null:
+		push_error("FloorSaveSystem.save_layout requires a Floor.")
+		return ERR_INVALID_PARAMETER
+	var dir := floor_dir(floor_def.floor_id)
+	if dir.is_empty():
+		push_error("FloorSaveSystem: floor id '%s' cannot be used as a save directory." % floor_def.floor_id)
+		return ERR_INVALID_PARAMETER
+	if DirAccess.make_dir_recursive_absolute(dir) != OK:
+		push_error("FloorSaveSystem could not create floor save dir '%s'." % dir)
+		return ERR_CANT_CREATE
+	var path := dir.path_join(LAYOUT_NAME)
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		push_error("FloorSaveSystem could not open '%s': %s" % [path, error_string(FileAccess.get_open_error())])
+		return FileAccess.get_open_error()
+	file.store_string(JSON.stringify(layout_data(floor_def), "\t"))
 	file.close()
 	return OK
 

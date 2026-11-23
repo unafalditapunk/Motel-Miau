@@ -77,6 +77,71 @@ const ROOM_TILE_LEFT_INNER_SET := preload("res://Assets/Sprites/Rooms/left_inner
 const ROOM_TILE_TOP_INNER_SET := preload("res://Assets/Sprites/Rooms/top_inner_corner_room_iso.png")
 const ROOM_TILE_RIGHT_INNER_SET := preload("res://Assets/Sprites/Rooms/right_inner_corner_room_iso.png")
 const ROOM_TILE_BOTTOM_INNER_SET := preload("res://Assets/Sprites/Rooms/bottom_inner_corner_room_iso.png")
+## Orange "blocked" set for invalid pending shapes (overlap, isolated,
+## disconnected). Same 12-tile layout as the valid/room sets; the
+## authored pieces are flips/rotations of the three sources.
+const BLOCKED_TILE_UP_LEFT := preload("res://Assets/Sprites/Rooms/up_left_side_blocked_iso.png")
+const BLOCKED_TILE_UP_RIGHT := preload("res://Assets/Sprites/Rooms/up_right_side_blocked_iso.png")
+const BLOCKED_TILE_DOWN_LEFT := preload("res://Assets/Sprites/Rooms/down_left_side_blocked_iso.png")
+const BLOCKED_TILE_DOWN_RIGHT := preload("res://Assets/Sprites/Rooms/down_right_side_blocked_iso.png")
+const BLOCKED_TILE_TOP_CORNER := preload("res://Assets/Sprites/Rooms/top_corner_blocked_iso.png")
+const BLOCKED_TILE_RIGHT_CORNER := preload("res://Assets/Sprites/Rooms/right_corner_blocked_iso.png")
+const BLOCKED_TILE_BOTTOM_CORNER := preload("res://Assets/Sprites/Rooms/bottom_corner_blocked_iso.png")
+const BLOCKED_TILE_LEFT_CORNER := preload("res://Assets/Sprites/Rooms/left_corner_blocked_iso.png")
+const BLOCKED_TILE_TOP_INNER := preload("res://Assets/Sprites/Rooms/top_inner_corner_blocked_iso.png")
+const BLOCKED_TILE_RIGHT_INNER := preload("res://Assets/Sprites/Rooms/right_inner_corner_blocked_iso.png")
+const BLOCKED_TILE_BOTTOM_INNER := preload("res://Assets/Sprites/Rooms/bottom_inner_corner_blocked_iso.png")
+const BLOCKED_TILE_LEFT_INNER := preload("res://Assets/Sprites/Rooms/left_inner_corner_blocked_iso.png")
+## Red "warning" set for invalid pending shapes (bad size etc.).
+const WARNING_TILE_UP_LEFT := preload("res://Assets/Sprites/Rooms/up_left_side_warning_iso.png")
+const WARNING_TILE_UP_RIGHT := preload("res://Assets/Sprites/Rooms/up_right_side_warning_iso.png")
+const WARNING_TILE_DOWN_LEFT := preload("res://Assets/Sprites/Rooms/down_left_side_warning_iso.png")
+const WARNING_TILE_DOWN_RIGHT := preload("res://Assets/Sprites/Rooms/down_right_side_warning_iso.png")
+const WARNING_TILE_TOP_CORNER := preload("res://Assets/Sprites/Rooms/top_corner_warning_iso.png")
+const WARNING_TILE_RIGHT_CORNER := preload("res://Assets/Sprites/Rooms/right_corner_warning_iso.png")
+const WARNING_TILE_BOTTOM_CORNER := preload("res://Assets/Sprites/Rooms/bottom_corner_warning_iso.png")
+const WARNING_TILE_LEFT_CORNER := preload("res://Assets/Sprites/Rooms/left_corner_warning_iso.png")
+const WARNING_TILE_TOP_INNER := preload("res://Assets/Sprites/Rooms/top_inner_corner_warning_iso.png")
+const WARNING_TILE_RIGHT_INNER := preload("res://Assets/Sprites/Rooms/right_inner_corner_warning_iso.png")
+const WARNING_TILE_BOTTOM_INNER := preload("res://Assets/Sprites/Rooms/bottom_inner_corner_warning_iso.png")
+const WARNING_TILE_LEFT_INNER := preload("res://Assets/Sprites/Rooms/left_inner_corner_warning_iso.png")
+## Special warning tiles for masks the 12-piece set can't express:
+## 3-edge dead ends (c_open, one per open side), opposite-edge
+## corridors (h_open, both diagonals), and the isolated 1x1 cell.
+const WARNING_C_OPEN_MISSING_LL := preload("res://Assets/Sprites/Rooms/down_left_c_open_side_warning_iso.png")
+const WARNING_C_OPEN_MISSING_LR := preload("res://Assets/Sprites/Rooms/c_open_missing_lr_warning_iso.png")
+const WARNING_C_OPEN_MISSING_UR := preload("res://Assets/Sprites/Rooms/c_open_missing_ur_warning_iso.png")
+const WARNING_C_OPEN_MISSING_UL := preload("res://Assets/Sprites/Rooms/c_open_missing_ul_warning_iso.png")
+const WARNING_H_OPEN_A := preload("res://Assets/Sprites/Rooms/down_left_h_open_side_warning_iso.png")
+const WARNING_H_OPEN_B := preload("res://Assets/Sprites/Rooms/up_left_h_open_side_warning_iso.png")
+const WARNING_FULL := preload("res://Assets/Sprites/Rooms/full_open_side_warning_iso.png")
+## Solid fill diamond (room blue, no edges) drawn under every cell of
+## a placed room so rooms read as filled shapes beneath the edge art.
+const NO_BORDER_ROOM_TEXTURE := preload("res://Assets/Sprites/Rooms/no_border_room_iso.png")
+## Tile palettes: 0 = valid (pending shape), 1 = room (placed),
+## 2 = blocked (overlap/isolated/disconnected), 3 = warning (invalid).
+const PALETTE_VALID := 0
+const PALETTE_ROOM := 1
+const PALETTE_BLOCKED := 2
+const PALETTE_WARNING := 3
+const SIDE_TILES := [
+	[ROOM_TILE_UP_LEFT, ROOM_TILE_UP_RIGHT, ROOM_TILE_DOWN_RIGHT, ROOM_TILE_DOWN_LEFT],
+	[ROOM_TILE_UP_LEFT_SET, ROOM_TILE_UP_RIGHT_SET, ROOM_TILE_DOWN_RIGHT_SET, ROOM_TILE_DOWN_LEFT_SET],
+	[BLOCKED_TILE_UP_LEFT, BLOCKED_TILE_UP_RIGHT, BLOCKED_TILE_DOWN_RIGHT, BLOCKED_TILE_DOWN_LEFT],
+	[WARNING_TILE_UP_LEFT, WARNING_TILE_UP_RIGHT, WARNING_TILE_DOWN_RIGHT, WARNING_TILE_DOWN_LEFT],
+]
+const CORNER_TILES := [
+	[ROOM_TILE_TOP_CORNER, ROOM_TILE_RIGHT_CORNER, ROOM_TILE_BOTTOM_CORNER, ROOM_TILE_LEFT_CORNER],
+	[ROOM_TILE_TOP_CORNER_SET, ROOM_TILE_RIGHT_CORNER_SET, ROOM_TILE_BOTTOM_CORNER_SET, ROOM_TILE_LEFT_CORNER_SET],
+	[BLOCKED_TILE_TOP_CORNER, BLOCKED_TILE_RIGHT_CORNER, BLOCKED_TILE_BOTTOM_CORNER, BLOCKED_TILE_LEFT_CORNER],
+	[WARNING_TILE_TOP_CORNER, WARNING_TILE_RIGHT_CORNER, WARNING_TILE_BOTTOM_CORNER, WARNING_TILE_LEFT_CORNER],
+]
+const INNER_TILES := [
+	[ROOM_TILE_TOP_INNER, ROOM_TILE_RIGHT_INNER, ROOM_TILE_BOTTOM_INNER, ROOM_TILE_LEFT_INNER],
+	[ROOM_TILE_TOP_INNER_SET, ROOM_TILE_RIGHT_INNER_SET, ROOM_TILE_BOTTOM_INNER_SET, ROOM_TILE_LEFT_INNER_SET],
+	[BLOCKED_TILE_TOP_INNER, BLOCKED_TILE_RIGHT_INNER, BLOCKED_TILE_BOTTOM_INNER, BLOCKED_TILE_LEFT_INNER],
+	[WARNING_TILE_TOP_INNER, WARNING_TILE_RIGHT_INNER, WARNING_TILE_BOTTOM_INNER, WARNING_TILE_LEFT_INNER],
+]
 ## Boundary-edge bit flags per cell, mapped from the four grid
 ## neighbor directions: -x -> UL, -y -> UR, +x -> LR, +y -> LL.
 const EDGE_UL := 1
@@ -154,6 +219,11 @@ var _hud_layer: CanvasLayer
 var _hud_label: Label
 ## [CanvasItem, was_visible] pairs hidden for the blueprint view.
 var _hidden_items: Array = []
+## Per-room precomputed tile draw ops keyed by instance id:
+## {room, sections, ops}. Room geometry is static during a session,
+## so ops rebuild only when global_sections() actually change — this
+## removes the per-frame cell/mask/inner-mark dictionary rebuild.
+var _room_draw_cache := {}
 
 func _ready() -> void:
 	add_to_group(GROUP)
@@ -456,6 +526,7 @@ func enter() -> bool:
 	if catalog != null:
 		catalog.catalog_open = false
 	active = true
+	_room_draw_cache.clear()
 	_apply_view_visibility()
 	if _camera != null:
 		# Keep the camera where the player was looking — no forced
@@ -480,10 +551,12 @@ func _hide_world_contents() -> void:
 			if item != null and HIDDEN_ROOM_CHILDREN.has(item.name):
 				_hidden_items.append([item, item.visible])
 				item.visible = false
-	var player := get_tree().get_first_node_in_group(&"player") as CanvasItem
-	if player != null:
-		_hidden_items.append([player, player.visible])
-		player.visible = false
+	for group_name in [&"player", &"net_avatar"]:
+		for member in get_tree().get_nodes_in_group(group_name):
+			var avatar := member as CanvasItem
+			if avatar != null:
+				_hidden_items.append([avatar, avatar.visible])
+				avatar.visible = false
 	var world := get_tree().get_first_node_in_group(&"world") as WorldBootstrap
 	var ghost: CanvasItem = null
 	if world != null:
@@ -507,6 +580,7 @@ func exit() -> void:
 	_dragging = false
 	_pressing = false
 	_pending_sections.clear()
+	_room_draw_cache.clear()
 	_close_panel()
 	_close_room_panel()
 	cursor_cell_valid = false
@@ -553,13 +627,8 @@ func _apply_view_visibility() -> void:
 	visible = active and view_mode == ViewMode.GRID
 	if _hud_layer != null:
 		_hud_layer.visible = active
-	# GRID view needs the wide editor zooms for whole-floor overview;
-	# ROOMS view uses the normal gameplay zooms so pixel art stays crisp.
-	if _camera != null and _camera.is_editor_active():
-		if view_mode == ViewMode.ROOMS:
-			_camera.editor_use_gameplay_zoom()
-		else:
-			_camera.editor_use_editor_zoom()
+	# Creation Mode keeps the normal gameplay zoom ladder in both
+	# views — only the camera pan/zoom input differs.
 
 # ------------------------------------------------------------------
 # Create Room tool
@@ -993,7 +1062,7 @@ func cursor_cell_for_world_position(world_position: Vector2) -> Vector2i:
 	return _grid.screen_to_grid(world_position)
 
 ## Centers the camera on the floor's room bounds (or the grid origin
-## when the floor has no rooms yet) at the widest overview zoom.
+## when the floor has no rooms yet) at the widest gameplay zoom.
 func _focus_overview() -> void:
 	if _camera == null:
 		return
@@ -1005,7 +1074,8 @@ func _focus_overview() -> void:
 			center = _grid.grid_to_screen_position(mid, 0.0)
 		else:
 			center = _grid.grid_to_screen_position(Vector2.ZERO, 0.0)
-	_camera.focus_on(center, 0)
+	var widest := _camera.zoom_levels.size() - 1
+	_camera.focus_on(center, widest)
 
 func _update_hud() -> void:
 	if _hud_label == null:
@@ -1098,42 +1168,79 @@ func _draw_grid_lines(cell_range: Rect2i) -> void:
 		var b := _grid.grid_to_screen_position(Vector2(x1, v), 0.0)
 		draw_line(a, b, line_color, 1.0)
 
-## Iso tile outline for each registered room's footprint plus its
-## room id at the centroid. Shaped rooms draw their union outline;
-## rectangular rooms get the same tiles via a single section.
+## Iso tile fill + outline for each registered room's footprint plus
+## its room id at the centroid. Shaped rooms draw their union outline;
+## rectangular rooms get the same tiles via a single section. Each
+## room gets a deterministic shade from its id so neighbours read
+## apart, and the room under the cursor shimmers while hovered
+## (inspection tool only — not while the create tool is active).
 func _draw_room_bounds() -> void:
 	var font := ThemeDB.fallback_font
-	for room in _room_world.get_rooms():
-		if room == null:
+	# One spatial lookup per frame instead of scanning every room's
+	# sections for the hover check (inspection tool only).
+	var hovered_room: Room = null
+	if cursor_cell_valid and tool != Tool.CREATE_ROOM:
+		hovered_room = _room_world.get_room_at_world_cell(cursor_cell)
+	var rooms := _room_world.get_rooms()
+	var live := {}
+	for room in rooms:
+		if room != null and is_instance_valid(room):
+			live[room] = true
+	# Release cached ops for rooms that left the floor.
+	for room_id in _room_draw_cache.keys():
+		var stale: Dictionary = _room_draw_cache[room_id]
+		if not is_instance_valid(stale.room) or not live.has(stale.room):
+			_room_draw_cache.erase(room_id)
+	for room in rooms:
+		if room == null or not is_instance_valid(room):
 			continue
-		var bounds := room.global_bounds()
-		_draw_shape_tiles(room.global_sections(), Color(1.0, 1.0, 1.0, 0.9), true)
+		var sections := room.global_sections()
+		var room_id := room.get_instance_id()
+		var entry: Dictionary = _room_draw_cache.get(room_id, {})
+		if entry.is_empty() or entry.sections != sections:
+			entry = {"room": room, "sections": sections,
+				"ops": _build_room_draw_ops(sections)}
+			_room_draw_cache[room_id] = entry
+		var tint := _room_tint(room)
+		if room == hovered_room:
+			tint = _hover_shimmer(tint)
+		for op in entry.ops:
+			draw_texture(op[0],
+				_grid.grid_to_screen_position(op[1], 0.0) - op[2], tint)
 		if font != null:
+			var bounds := room.global_bounds()
 			var center := _grid.grid_to_screen_position(
 				Vector2(bounds.position) + Vector2(bounds.size) * 0.5, 0.0)
 			draw_string(font, center + Vector2(-16.0, 4.0), "(%d, %d)" % [
 				room.room_coordinates.x, room.room_coordinates.y],
 				HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.8, 0.95, 1.0, 0.85))
 
-## Filled + outlined iso polygon for one global cell rect, using the
-## half-integer corner convention shared by rooms and the grid.
-func _draw_section_poly(rect: Rect2i, fill: Color, border: Color, width: float) -> void:
-	var x0 := float(rect.position.x) - 0.5
-	var y0 := float(rect.position.y) - 0.5
-	var x1 := float(rect.end.x) - 0.5
-	var y1 := float(rect.end.y) - 0.5
-	var points := PackedVector2Array()
-	for corner in [Vector2(x0, y0), Vector2(x1, y0), Vector2(x1, y1), Vector2(x0, y1)]:
-		points.append(_grid.grid_to_screen_position(corner, 0.0))
-	draw_colored_polygon(points, fill)
-	draw_polyline(points + PackedVector2Array([points[0]]), border, width)
+## Deterministic per-room tint: independent red/green multipliers
+## derived from the room id shift the blue hue a little (azure ↔
+## deep blue) while blue stays dominant.
+func _room_tint(room: Room) -> Color:
+	var h := room.room_coordinates
+	var r := 0.60 + 0.40 * float(absi(h.x * 73856093 +
+		h.y * 19349663) % 1000) / 1000.0
+	var g := 0.45 + 0.55 * float(absi(h.x * 83492791 +
+		h.y * 2971215073) % 1000) / 1000.0
+	var b := 0.80 + 0.20 * float(absi(h.x * 2654435761 +
+		h.y * 40503) % 1000) / 1000.0
+	return Color(r, g, b, 0.9)
+
+## Gentle brightness shimmer for the hovered room: lerps the shade
+## toward white on a slow sine so it reads as a soft flash.
+func _hover_shimmer(base: Color) -> Color:
+	var pulse := 0.5 + 0.5 * sin(Time.get_ticks_msec() / 1000.0 * TAU * 1.4)
+	return base.lerp(Color(1.0, 1.0, 1.0, base.a), 0.25 + 0.30 * pulse)
 
 ## Iso tile outline for a set of global cell sections: every cell whose
 ## boundary-edge pattern is a single edge or two adjacent edges draws
 ## the matching tile; interior and complex-edge cells draw nothing
 ## (callers keep a polygon underlay for those). Sections may overlap;
 ## cells are unioned so shared edges stay hidden.
-func _draw_shape_tiles(sections: Array, tint: Color, for_rooms := false) -> void:
+func _draw_shape_tiles(sections: Array, tint: Color, palette := PALETTE_VALID,
+		fill_texture: Texture2D = null) -> void:
 	var cells := {}
 	for section in sections:
 		for y in range(section.position.y, section.end.y):
@@ -1142,13 +1249,64 @@ func _draw_shape_tiles(sections: Array, tint: Color, for_rooms := false) -> void
 	var masks := {}
 	for cell in cells:
 		masks[cell] = _boundary_mask(cell, cells)
-	_draw_inner_corner_marks(cells, masks, tint, for_rooms)
+	var inner_marks := _plan_inner_marks(cells, masks, palette)
+	var marked := {}
+	for mark in inner_marks:
+		marked[mark[0]] = true
+	# Fill only cells that get no tile of their own — edge/corner and
+	# inner-mark tiles carry their own fill, so every cell ends up
+	# with exactly one fill layer and a uniform shade.
+	if fill_texture != null:
+		for cell in cells:
+			if _edge_tile_for_mask(masks[cell], palette) != null or marked.has(cell):
+				continue
+			var fill_center := _grid.grid_to_screen_position(Vector2(cell), 0.0)
+			draw_texture(fill_texture,
+				fill_center - Vector2(fill_texture.get_size()) * 0.5, tint)
+	for mark in inner_marks:
+		var mark_center := _grid.grid_to_screen_position(Vector2(mark[0]), 0.0)
+		draw_texture(mark[1], mark_center - Vector2(mark[1].get_size()) * 0.5, tint)
 	for cell in cells:
-		var texture := _edge_tile_for_mask(masks[cell], for_rooms)
+		var texture := _edge_tile_for_mask(masks[cell], palette)
 		if texture == null:
 			continue
 		var center := _grid.grid_to_screen_position(Vector2(cell), 0.0)
 		draw_texture(texture, center - Vector2(texture.get_size()) * 0.5, tint)
+
+## Precomputes every tile draw for a room footprint once, in the same
+## order _draw_shape_tiles emits them (fill cells, inner-corner marks,
+## edge/corner tiles) with the room palette + no-border fill. Returns
+## [texture, grid_position, half_size] triples — positions stay in
+## grid space so camera moves/pans never invalidate the cache.
+func _build_room_draw_ops(sections: Array) -> Array:
+	var cells := {}
+	for section in sections:
+		for y in range(section.position.y, section.end.y):
+			for x in range(section.position.x, section.end.x):
+				cells[Vector2i(x, y)] = true
+	var masks := {}
+	for cell in cells:
+		masks[cell] = _boundary_mask(cell, cells)
+	var inner_marks := _plan_inner_marks(cells, masks, PALETTE_ROOM)
+	var marked := {}
+	for mark in inner_marks:
+		marked[mark[0]] = true
+	var ops := []
+	if NO_BORDER_ROOM_TEXTURE != null:
+		var fill_half := NO_BORDER_ROOM_TEXTURE.get_size() * 0.5
+		for cell in cells:
+			if _edge_tile_for_mask(masks[cell], PALETTE_ROOM) != null \
+					or marked.has(cell):
+				continue
+			ops.append([NO_BORDER_ROOM_TEXTURE, Vector2(cell), fill_half])
+	for mark in inner_marks:
+		ops.append([mark[1], Vector2(mark[0]), mark[1].get_size() * 0.5])
+	for cell in cells:
+		var texture := _edge_tile_for_mask(masks[cell], PALETTE_ROOM)
+		if texture == null:
+			continue
+		ops.append([texture, Vector2(cell), texture.get_size() * 0.5])
+	return ops
 
 ## Boundary-edge bitmask for one cell: a bit is set when the neighbor
 ## in that grid direction is absent from the shape.
@@ -1164,32 +1322,65 @@ func _boundary_mask(cell: Vector2i, cells: Dictionary) -> int:
 		mask |= EDGE_LL
 	return mask
 
-## Side/corner tile for a boundary mask, or null for masks with no
-## dedicated tile (interior, opposite edges, 3-edge cells).
-func _edge_tile_for_mask(mask: int, for_rooms := false) -> Texture2D:
+## Side/corner tile for a boundary mask in the given palette, or null
+## for masks with no dedicated tile (interior, opposite edges, 3-edge).
+func _edge_tile_for_mask(mask: int, palette: int) -> Texture2D:
+	# Side order matches SIDE_TILES: UL, UR, LR, LL.
+	var side := -1
 	if mask == EDGE_UL:
-		return ROOM_TILE_UP_LEFT_SET if for_rooms else ROOM_TILE_UP_LEFT
-	if mask == EDGE_UR:
-		return ROOM_TILE_UP_RIGHT_SET if for_rooms else ROOM_TILE_UP_RIGHT
-	if mask == EDGE_LR:
-		return ROOM_TILE_DOWN_RIGHT_SET if for_rooms else ROOM_TILE_DOWN_RIGHT
-	if mask == EDGE_LL:
-		return ROOM_TILE_DOWN_LEFT_SET if for_rooms else ROOM_TILE_DOWN_LEFT
+		side = 0
+	elif mask == EDGE_UR:
+		side = 1
+	elif mask == EDGE_LR:
+		side = 2
+	elif mask == EDGE_LL:
+		side = 3
+	if side >= 0:
+		return SIDE_TILES[palette][side]
+	# Corner order matches CORNER_TILES: TOP, RIGHT, BOTTOM, LEFT.
+	var corner := -1
 	if mask == (EDGE_UL | EDGE_UR):
-		return ROOM_TILE_TOP_CORNER_SET if for_rooms else ROOM_TILE_TOP_CORNER
-	if mask == (EDGE_UR | EDGE_LR):
-		return ROOM_TILE_RIGHT_CORNER_SET if for_rooms else ROOM_TILE_RIGHT_CORNER
-	if mask == (EDGE_LL | EDGE_LR):
-		return ROOM_TILE_BOTTOM_CORNER_SET if for_rooms else ROOM_TILE_BOTTOM_CORNER
-	if mask == (EDGE_UL | EDGE_LL):
-		return ROOM_TILE_LEFT_CORNER_SET if for_rooms else ROOM_TILE_LEFT_CORNER
+		corner = 0
+	elif mask == (EDGE_UR | EDGE_LR):
+		corner = 1
+	elif mask == (EDGE_LL | EDGE_LR):
+		corner = 2
+	elif mask == (EDGE_UL | EDGE_LL):
+		corner = 3
+	if corner >= 0:
+		return CORNER_TILES[palette][corner]
+	if palette == PALETTE_WARNING:
+		return _warning_special_tile(mask)
+	return null
+
+## Warning-only tiles for the remaining boundary masks: 3-edge dead
+## ends, opposite-edge corridors, and the fully-bordered 1x1 cell.
+func _warning_special_tile(mask: int) -> Texture2D:
+	# 3-edge masks = all edges except the open one.
+	if mask == (EDGE_UL | EDGE_UR | EDGE_LR):
+		return WARNING_C_OPEN_MISSING_LL
+	if mask == (EDGE_UL | EDGE_UR | EDGE_LL):
+		return WARNING_C_OPEN_MISSING_LR
+	if mask == (EDGE_UL | EDGE_LR | EDGE_LL):
+		return WARNING_C_OPEN_MISSING_UR
+	if mask == (EDGE_UR | EDGE_LR | EDGE_LL):
+		return WARNING_C_OPEN_MISSING_UL
+	# Opposite-edge corridor masks.
+	if mask == (EDGE_UL | EDGE_LR):
+		return WARNING_H_OPEN_A
+	if mask == (EDGE_UR | EDGE_LL):
+		return WARNING_H_OPEN_B
+	# Isolated single cell — every edge is a boundary.
+	if mask == (EDGE_UL | EDGE_UR | EDGE_LR | EDGE_LL):
+		return WARNING_FULL
 	return null
 
 ## Concave (reflex) vertices: exactly 3 of the 4 cells around a grid
-## vertex are occupied, so the outline turns inward. The inner-corner
-## mark is drawn on an occupied neighbor cell whose own mask has no
-## edge tile, so the two opaque tiles never overlap.
-func _draw_inner_corner_marks(cells: Dictionary, masks: Dictionary, tint: Color, for_rooms := false) -> void:
+## vertex are occupied, so the outline turns inward. Returns [cell,
+## texture] pairs — the mark is drawn on an occupied neighbor cell
+## whose own mask has no edge tile, so the two opaque tiles never
+## overlap.
+func _plan_inner_marks(cells: Dictionary, masks: Dictionary, palette: int) -> Array:
 	var reflex := {}
 	for cell: Vector2i in cells:
 		var x := cell.x
@@ -1214,15 +1405,16 @@ func _draw_inner_corner_marks(cells: Dictionary, masks: Dictionary, tint: Color,
 					present += 1
 			if present == 3:
 				reflex[v] = verts[v]
+	var marks := []
 	for v in reflex:
 		var draw_cell := _inner_mark_cell(reflex[v], masks)
 		if draw_cell.x == -2147483648:
 			continue
-		var texture := _inner_tile_for_vertex(v, draw_cell, for_rooms)
+		var texture := _inner_tile_for_vertex(v, draw_cell, palette)
 		if texture == null:
 			continue
-		var center := _grid.grid_to_screen_position(Vector2(draw_cell), 0.0)
-		draw_texture(texture, center - Vector2(texture.get_size()) * 0.5, tint)
+		marks.append([draw_cell, texture])
+	return marks
 
 ## Picks an occupied cell around reflex vertex v whose boundary mask
 ## draws no edge tile (so the opaque inner mark cannot overdraw one).
@@ -1230,21 +1422,22 @@ func _draw_inner_corner_marks(cells: Dictionary, masks: Dictionary, tint: Color,
 func _inner_mark_cell(candidates: Array, masks: Dictionary) -> Vector2i:
 	const NONE := Vector2i(-2147483648, -2147483648)
 	for c in candidates:
-		if masks.has(c) and _edge_tile_for_mask(masks[c]) == null:
+		if masks.has(c) and _edge_tile_for_mask(masks[c], PALETTE_VALID) == null:
 			return c
 	return NONE
 
 ## Inner-corner tile whose mark vertex coincides with reflex vertex v
-## when the tile is centered on draw_cell.
-func _inner_tile_for_vertex(v: Vector2i, draw_cell: Vector2i, for_rooms := false) -> Texture2D:
+## when the tile is centered on draw_cell. INNER_TILES order: TOP,
+## RIGHT, BOTTOM, LEFT.
+func _inner_tile_for_vertex(v: Vector2i, draw_cell: Vector2i, palette: int) -> Texture2D:
 	if v == Vector2i(2 * draw_cell.x - 1, 2 * draw_cell.y - 1):
-		return ROOM_TILE_TOP_INNER_SET if for_rooms else ROOM_TILE_TOP_INNER
+		return INNER_TILES[palette][0]
 	if v == Vector2i(2 * draw_cell.x + 1, 2 * draw_cell.y - 1):
-		return ROOM_TILE_RIGHT_INNER_SET if for_rooms else ROOM_TILE_RIGHT_INNER
+		return INNER_TILES[palette][1]
 	if v == Vector2i(2 * draw_cell.x + 1, 2 * draw_cell.y + 1):
-		return ROOM_TILE_BOTTOM_INNER_SET if for_rooms else ROOM_TILE_BOTTOM_INNER
+		return INNER_TILES[palette][2]
 	if v == Vector2i(2 * draw_cell.x - 1, 2 * draw_cell.y + 1):
-		return ROOM_TILE_LEFT_INNER_SET if for_rooms else ROOM_TILE_LEFT_INNER
+		return INNER_TILES[palette][3]
 	return null
 
 ## Iso hover tile under the cursor: the pending shape's validity wins
@@ -1271,9 +1464,9 @@ func _hover_texture_for_cursor() -> Texture2D:
 		return HOVER_BLOCKED_TEXTURE
 	return HOVER_POSITIVE_TEXTURE
 
-## Pending shape preview: a valid union draws the green iso room
-## tiles (shared edges between sections stay hidden); invalid states
-## keep the colored polygon fallback until their art exists.
+## Pending shape preview: the union draws iso room tiles in the
+## palette matching its validity — green valid, orange blocked
+## (overlap/isolated/disconnected), red warning (invalid size).
 func _draw_selection_preview() -> void:
 	if tool != Tool.CREATE_ROOM:
 		return
@@ -1287,30 +1480,13 @@ func _draw_selection_preview() -> void:
 	if preview_sections.is_empty():
 		return
 	var validity := _shape_validity(preview_sections)
-	if validity == SelectionValidity.VALID:
-		_draw_shape_tiles(preview_sections, Color(1.0, 1.0, 1.0, 0.7))
-	else:
-		var committed_fill := Color(0.35, 1.0, 0.55, 0.10)
-		var committed_border := Color(0.45, 1.0, 0.6, 0.9)
-		for section in _pending_sections:
-			_draw_section_poly(section, committed_fill, committed_border, 2.5)
-		if has_drag:
-			var fill: Color
-			var border: Color
-			match validity:
-				SelectionValidity.OVERLAP:
-					fill = Color(1.0, 0.6, 0.25, 0.20)
-					border = Color(1.0, 0.65, 0.3, 0.9)
-				SelectionValidity.ISOLATED, SelectionValidity.DISCONNECTED:
-					fill = Color(1.0, 0.85, 0.25, 0.20)
-					border = Color(1.0, 0.9, 0.35, 0.9)
-				SelectionValidity.INVALID:
-					fill = Color(1.0, 0.3, 0.3, 0.20)
-					border = Color(1.0, 0.35, 0.35, 0.9)
-				_:
-					fill = committed_fill
-					border = committed_border
-			_draw_section_poly(drag_rect, fill, border, 1.5)
+	var palette := PALETTE_VALID
+	if validity == SelectionValidity.OVERLAP or validity == SelectionValidity.ISOLATED \
+			or validity == SelectionValidity.DISCONNECTED:
+		palette = PALETTE_BLOCKED
+	elif validity == SelectionValidity.INVALID:
+		palette = PALETTE_WARNING
+	_draw_shape_tiles(preview_sections, Color(1.0, 1.0, 1.0, 0.75), palette)
 	if not has_drag:
 		return
 	var font := ThemeDB.fallback_font
@@ -1321,8 +1497,12 @@ func _draw_selection_preview() -> void:
 			("overlap" if validity == SelectionValidity.OVERLAP else \
 			("isolated" if validity == SelectionValidity.ISOLATED else \
 			("disconnected" if validity == SelectionValidity.DISCONNECTED else "invalid")))
+		var label_color := Color(0.45, 1.0, 0.6, 0.9)
+		if palette == PALETTE_BLOCKED:
+			label_color = Color(1.0, 0.65, 0.3, 0.9)
+		elif palette == PALETTE_WARNING:
+			label_color = Color(1.0, 0.4, 0.35, 0.9)
 		draw_string(font, center + Vector2(-30.0, 4.0),
 			"%dx%d  (%d, %d)  %s" % [drag_rect.size.x, drag_rect.size.y,
 				drag_rect.position.x, drag_rect.position.y, status],
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 11,
-			Color(0.45, 1.0, 0.6, 0.9))
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 11, label_color)

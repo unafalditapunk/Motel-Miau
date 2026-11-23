@@ -405,6 +405,32 @@ func load_floor(floor_id: StringName, target_world: RoomWorld = null) -> bool:
 		floor_switched.emit(floor_def)
 	return true
 
+## Materializes a floor from its res:// definition ONLY: no layout
+## override, no save-manifest check, no room-state hydration, no
+## player-state restore. Multiplayer clients use this for their
+## pre-snapshot boot — the authoritative layout and contents arrive
+## later via WorldSnapshot.apply. The result is a valid but empty
+## world; it is NOT save-compatible state.
+func load_floor_without_save(floor_id: StringName, target_world: RoomWorld = null) -> bool:
+	var floor_def := get_floor(floor_id)
+	var world := target_world if target_world != null else room_world
+	if floor_def == null or world == null:
+		push_error("FloorManager.load_floor_without_save requires a registered floor and a RoomWorld.")
+		return false
+	var problems := validate_floor(floor_def)
+	if not problems.is_empty():
+		push_error("FloorManager.load_floor_without_save: floor '%s' is invalid: %s" % [floor_id, ", ".join(problems)])
+		return false
+	if not materialize_floor(floor_def, world):
+		return false
+	_hook_world(world)
+	world.save_directory = floor_save_dir(floor_def.floor_id)
+	if world == room_world:
+		active_floor = floor_def
+		_dirty = false
+		floor_switched.emit(floor_def)
+	return true
+
 ## Switches the bound world to another floor. Order of operations is
 ## deliberately fail-safe:
 ##   1. The outgoing floor is saved first; if saving fails the switch
@@ -674,9 +700,31 @@ func save_floor_layout() -> Error:
 ## fail to parse are skipped with a warning.
 func _apply_layout_override(floor_def: Floor) -> void:
 	var data := FloorSaveSystem.load_layout(floor_def.floor_id)
-	var entries: Array = data.get("rooms", [])
-	if entries.is_empty():
+	if data.is_empty():
 		return
+	_apply_layout_entries(floor_def, data)
+
+## Applies an already-parsed layout dictionary — the same shape
+## FloorSaveSystem.load_layout returns — to floor_def in memory.
+## Used by the multiplayer snapshot path so a client adopts the
+## server's authoritative room layout; never writes layout.json and
+## never touches res:// resources. Returns false when the data holds
+## no usable room specs.
+func apply_layout_data(floor_def: Floor, data: Dictionary) -> bool:
+	if floor_def == null or not (data is Dictionary):
+		return false
+	var entries: Variant = data.get("rooms")
+	if not (entries is Array) or (entries as Array).is_empty():
+		return false
+	_apply_layout_entries(floor_def, data)
+	return not floor_def.rooms.is_empty()
+
+## The spec-parsing half of the layout override, shared by the
+## user:// path (_apply_layout_override) and the network path
+## (apply_layout_data). Entries that fail to parse are skipped with
+## a warning; entry/spawn ride along when present.
+func _apply_layout_entries(floor_def: Floor, data: Dictionary) -> void:
+	var entries: Array = data.get("rooms", [])
 	var specs: Array[FloorRoomSpec] = []
 	for entry in entries:
 		if not (entry is Dictionary):

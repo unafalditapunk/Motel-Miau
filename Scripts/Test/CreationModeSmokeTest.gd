@@ -206,20 +206,20 @@ func _run_checks() -> void:
 	var rooms_floor := sample_room.get_node_or_null("FloorRenderer") as CanvasItem
 	_expect(rooms_floor != null and rooms_floor.visible, "room floor not restored in room view")
 	_expect(_player.visible, "player not restored in room view")
-	# ROOMS view uses the normal gameplay zoom ladder (crisp pixels).
-	_expect(_camera.zoom_levels.size() == gameplay_zoom_count, "room view did not restore gameplay zoom levels")
+	# Both views keep the normal gameplay zoom ladder.
+	_expect(_camera.zoom_levels.size() == gameplay_zoom_count, "room view changed the zoom ladder")
 	_editor._unhandled_input(_key(KEY_V))
 	_expect(_editor.view_mode == FloorEditor.ViewMode.GRID, "V did not switch back to grid view")
 	_expect(_editor.visible, "editor not visible back in grid view")
 	_editor._process(0.0)
 	_expect(not rooms_floor.visible, "room floor not hidden back in grid view")
-	_expect(_camera.zoom_levels.size() == _camera.editor_zoom_levels.size(), "grid view did not restore editor zoom levels")
+	_expect(_camera.zoom_levels.size() == gameplay_zoom_count, "grid view changed the zoom ladder")
 
 	# --- Home resets the camera to the floor overview ---
 	_camera.focus_on(Vector2(9999.0, 9999.0), 5)
 	_editor._unhandled_input(_key(KEY_B))
 	_expect(_camera.global_position.distance_to(expected_center) < 1.0, "Home did not reset camera to overview")
-	_expect(is_equal_approx(_camera.zoom.x, _camera.editor_zoom_levels[0]), "Home did not zoom out to overview")
+	_expect(is_equal_approx(_camera.zoom.x, _camera.zoom_levels[_camera.zoom_levels.size() - 1]), "Home did not zoom out to overview")
 
 	# --- Escape returns to Build Mode ---
 	_editor._unhandled_input(_key(KEY_ESCAPE))

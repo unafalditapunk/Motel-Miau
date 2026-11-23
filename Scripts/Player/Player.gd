@@ -29,6 +29,28 @@ var _move_elev_to := 0.0
 var _buffered_direction := Vector2i.ZERO
 var _held_moves: Dictionary = {}
 
+## True for network-driven avatars: remote-player replicas on clients
+## and the server's authoritative bodies. They never join the "player"
+## group (camera follow, placement ghost and blueprint hiding must keep
+## finding only the local avatar) and ignore local movement input.
+## Set BEFORE add_child — _ready reads it.
+var network_remote := false
+## When true, local movement input is ignored entirely (no prediction,
+## no move_requested). MultiplayerManager sets this on clients until
+## the authoritative world snapshot has been applied, so a client can
+## never walk a world that does not match the server's.
+var local_input_locked := false
+
+## Emitted whenever the authoritative grid state (room/cell/elevation)
+## settles after an accepted move. The dedicated server uses it to
+## broadcast position updates; local single-player play ignores it.
+signal authoritative_state_changed
+## Emitted once per EXECUTED move step (including buffered steps and
+## room transitions) — never for rejected or merely-buffered intents.
+## MultiplayerManager forwards these to the server as validation
+## requests, so the request stream matches the predicted step stream.
+signal move_requested(direction: Vector2i)
+
 @onready var visual: AnimatedSprite2D = $Visual
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
 
@@ -37,7 +59,10 @@ func _ready() -> void:
 		block_layer = get_parent() as BlockLayer
 	if grid == null:
 		push_error("Player requires an IsometricGrid resource.")
-	add_to_group(&"player")
+	if not network_remote:
+		add_to_group(&"player")
+	else:
+		add_to_group(&"net_avatar")
 	_ensure_sprite_frames()
 	_configure_collision()
 	_update_visual_metrics()
@@ -61,6 +86,26 @@ func place_at(new_grid_position: Vector2i, new_elevation: float) -> void:
 	elevation = new_elevation
 	_cancel_movement()
 	_update_visual_position()
+	authoritative_state_changed.emit()
+
+## Remote-avatar update: retarget room/cell/elevation to a state the
+## server already validated and replay the same eased step locally.
+## No validation happens here — trust the authority, not the packet.
+func network_apply_state(target_room: Room, target_cell: Vector2i,
+		target_elevation: float, face: Vector2i) -> void:
+	if target_room == null:
+		return
+	room = target_room
+	block_layer = target_room.block_layer
+	room_size = target_room.size
+	if _is_cardinal_direction(face):
+		_set_facing(face)
+	var from_screen := position
+	var from_elevation := elevation
+	grid_position = target_cell
+	elevation = target_elevation
+	var to_screen := _screen_position_for_cell(target_cell, target_elevation)
+	_play_move(from_screen, to_screen, from_elevation, target_elevation)
 
 func snap_to_surface() -> void:
 	if block_layer != null:
@@ -112,6 +157,7 @@ func move_to(cell: Vector2i) -> bool:
 	grid_position = cell
 	elevation = movement_elevation_for(cell)
 	_update_visual_position()
+	authoritative_state_changed.emit()
 	return true
 
 func _cancel_movement() -> void:
@@ -119,11 +165,13 @@ func _cancel_movement() -> void:
 	_move_elapsed = 0.0
 	_buffered_direction = Vector2i.ZERO
 
-## True while a modal world UI (FloorPanel) or Creation Mode is active;
-## movement input is ignored so the player can't walk behind the UI or
-## interfere with floor editing.
+## True while a modal world UI (FloorPanel), Creation Mode, or an
+## external input lock (multiplayer pre-sync) is active; movement
+## input is ignored so the player can't walk behind the UI, interfere
+## with floor editing, or act on an unsynchronized world.
 func _world_ui_blocked() -> bool:
-	return FloorPanel.any_open(get_tree()) or FloorEditor.any_active(get_tree())
+	return local_input_locked \
+		or FloorPanel.any_open(get_tree()) or FloorEditor.any_active(get_tree())
 
 func request_move(direction: Vector2i) -> void:
 	if direction == Vector2i.ZERO or _world_ui_blocked():
@@ -226,6 +274,7 @@ func _start_room_transition(direction: Vector2i) -> bool:
 	if dest_room == null:
 		return false
 	_set_facing(direction)
+	move_requested.emit(direction)
 	var previous_room := room
 	var from_screen := position
 	var previous_elevation := elevation
@@ -237,6 +286,7 @@ func _start_room_transition(direction: Vector2i) -> bool:
 	room_world.set_primary_room(dest_room.room_coordinates)
 	room_world.save_room_state(previous_room)
 	var to_screen := _screen_position_for_cell(grid_position, elevation)
+	authoritative_state_changed.emit()
 	return _play_move(from_screen, to_screen, previous_elevation, elevation)
 
 ## Attempts an interactive (non-spatial) connection transition. entry is
@@ -272,6 +322,7 @@ func _try_connection_transition(entry: Dictionary, from_screen: Vector2, from_el
 	room_world.set_primary_room(dest_room.room_coordinates)
 	room_world.save_room_state(previous_room)
 	var to_screen := _screen_position_for_cell(grid_position, elevation)
+	authoritative_state_changed.emit()
 	return _play_move(from_screen, to_screen, previous_elevation, elevation)
 
 func _start_move(direction: Vector2i) -> bool:
@@ -283,6 +334,10 @@ func _start_move(direction: Vector2i) -> bool:
 	if not can_move_to(target):
 		return false
 	_set_facing(direction)
+	# The move intent is only reported once it actually starts —
+	# request_move() buffers during a step, and _finish_move re-enters
+	# here, so this emits exactly once per executed step.
+	move_requested.emit(direction)
 
 	var from_screen := position
 	var from_elevation := elevation
@@ -297,6 +352,7 @@ func _start_move(direction: Vector2i) -> bool:
 		if not entry.is_empty() and _try_connection_transition(entry, from_screen, from_elevation):
 			return true
 	var to_screen := _screen_position_for_cell(target, target_elevation)
+	authoritative_state_changed.emit()
 	return _play_move(from_screen, to_screen, from_elevation, target_elevation)
 
 func _play_move(from_screen: Vector2, to_screen: Vector2, from_elevation: float, to_elevation: float) -> bool:
@@ -340,6 +396,8 @@ func _finish_move() -> void:
 	_start_move(direction)
 
 func _unhandled_key_input(event: InputEvent) -> void:
+	if network_remote:
+		return
 	if _world_ui_blocked():
 		_held_moves.clear()
 		_buffered_direction = Vector2i.ZERO
@@ -360,7 +418,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		_held_moves.erase(key_event.physical_keycode)
 
 func _update_held_movement() -> void:
-	if _held_moves.is_empty() or _world_ui_blocked():
+	if network_remote or _held_moves.is_empty() or _world_ui_blocked():
 		return
 	var now := Time.get_ticks_msec()
 	var direction := Vector2i.ZERO

@@ -15,13 +15,8 @@ extends Camera2D
 @export_group("Editor")
 ## Pan speed in screen pixels per second while editor mode is active.
 @export var editor_pan_speed := 900.0
-## Zoom ladder used while editor mode is active (wider range than
-## gameplay so whole floors can be overviewed).
-@export var editor_zoom_levels := PackedFloat32Array([0.4, 0.7, 1.0, 1.5, 2.2, 3.0])
 
 var _editor_active := false
-var _saved_zoom_levels := PackedFloat32Array()
-var _saved_zoom_index := 0
 var _pan_dragging := false
 var _pan_drag_last := Vector2.ZERO
 
@@ -138,58 +133,22 @@ func get_world_mouse_position() -> Vector2:
 func is_editor_active() -> bool:
 	return _editor_active
 
-## Detaches the camera from the player and swaps in the wider editor
-## zoom ladder. Gameplay zoom settings are restored on set_editor_mode
-## (false). Camera position is left untouched; call focus_on() to aim.
+## Detaches the camera from the player for floor editing. The
+## gameplay zoom ladder is kept — Creation Mode uses the same zooms
+## as normal play. Camera position is left untouched; call focus_on()
+## to aim.
 func set_editor_mode(editor_enabled: bool) -> void:
 	if editor_enabled == _editor_active:
 		return
 	_editor_active = editor_enabled
-	if editor_enabled:
-		_saved_zoom_levels = zoom_levels
-		_saved_zoom_index = current_zoom_index
-		zoom_levels = editor_zoom_levels
-		# Preserve the current zoom factor where the editor ladder allows.
-		current_zoom_index = _nearest_zoom_index(zoom.x)
-		_apply_zoom_level()
-	else:
+	if not editor_enabled:
 		_pan_dragging = false
-		zoom_levels = _saved_zoom_levels
-		current_zoom_index = _saved_zoom_index
-		_apply_zoom_level()
 
 ## Centers the camera on a world position, optionally at a zoom level.
 func focus_on(world_position: Vector2, zoom_index := -1) -> void:
 	global_position = world_position
 	if zoom_index >= 0:
 		set_zoom_level(zoom_index)
-
-## Swaps the zoom ladder while staying in editor mode, preserving the
-## current zoom factor where possible. Used to give ROOMS view the
-## crisp gameplay zooms while GRID view keeps the wide editor range.
-func editor_set_zoom_levels(levels: PackedFloat32Array) -> void:
-	if not _editor_active or levels.is_empty():
-		return
-	var current := zoom.x
-	zoom_levels = levels
-	current_zoom_index = _nearest_zoom_index(current)
-	_apply_zoom_level()
-
-func editor_use_gameplay_zoom() -> void:
-	editor_set_zoom_levels(_saved_zoom_levels)
-
-func editor_use_editor_zoom() -> void:
-	editor_set_zoom_levels(editor_zoom_levels)
-
-func _nearest_zoom_index(level: float) -> int:
-	var best := 0
-	var best_distance := INF
-	for index in zoom_levels.size():
-		var distance := absf(zoom_levels[index] - level)
-		if distance < best_distance:
-			best_distance = distance
-			best = index
-	return best
 
 ## Held-key pan for editor mode. Runs from _process so it does not
 ## compete with the player's key-event movement handling.

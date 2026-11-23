@@ -50,6 +50,19 @@ func refresh() -> void:
 		apply_emphasis(room)
 	_update_neighbor_concealment()
 
+## Whether a room's contents are currently revealed to the local
+## player: shown per the neighborhood/show_from_outside rules, not
+## faded out by the primary room's show_outside=false concealment,
+## and not sliding out. Remote avatars mirror this so a player only
+## appears where their room is actually visible.
+func is_room_revealed(room: Room) -> bool:
+	if room == null or not room.visible:
+		return false
+	if _concealed_rooms.has(room):
+		return false
+	var slide: Dictionary = _room_slide.get(room, {})
+	return not bool(slide.get("exiting", false))
+
 func apply_emphasis(room: Room) -> void:
 	if room == null:
 		return

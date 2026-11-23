@@ -35,6 +35,8 @@ TESTS=(
     CarpetSmokeTest
     BuildingCatalogSmokeTest
     BuildingUiSmokeTest
+    WorldSnapshotSmokeTest
+    BuildOpsSmokeTest
 )
 
 if [ -n "$FILTER" ]; then

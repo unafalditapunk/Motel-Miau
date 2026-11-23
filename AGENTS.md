@@ -162,8 +162,8 @@ write to the real `user://saves`.
   world-cell grid (visible cell range from the camera, capped) with
   occupied room bounds shaded; V toggles GRID/ROOMS view, B recenters
   on the floor bounds. WorldCamera gains `set_editor_mode()` (detaches
-  follow, wider `editor_zoom_levels`), WASD/arrow + middle-drag pan, and
-  `focus_on()`. Cursor cell = `grid.screen_to_grid(mouse world pos)` via
+  follow, keeps the normal gameplay zoom ladder), WASD/arrow +
+  middle-drag pan, and `focus_on()`. Cursor cell = `grid.screen_to_grid(mouse world pos)` via
   `cursor_cell_for_world_position()` (injectable for headless tests).
   DebugHud adds a `Mode: CREATION` line with view + cursor cell.
   Creation Mode (Phase 2): the Create Room tool (C toggles, GRID view
@@ -233,3 +233,77 @@ write to the real `user://saves`.
   `get_visible_room_coordinates()`, `get_spatial_neighbors()`,
   `spatial_distance_from_primary()`, `get_connected_room_ids()`, and
   `connection_distance_from_primary()` expose it; F3 shows counts.
+- Multiplayer prototype: `MultiplayerManager` (`Scripts/Net/`, Node
+  child of WorldBootstrap named "MultiplayerManager" — the stable RPC
+  path) exists ONLY when launch args request it; no args = pure
+  single-player. `-- --server` runs a dedicated ENet server (peer 1,
+  headless-friendly, skips save-on-exit), `-- --client[=IP] --port=N`
+  connects (default 127.0.0.1:7777), `--autowalk` paces the local
+  player for headless tests. The server owns one authoritative Player
+  body per peer (`network_remote=true`: no "player" group membership,
+  no local input — remote avatars join "net_avatar" instead so camera
+  follow and blueprint hiding keep working). Clients send move
+  REQUESTS (directions via `move_requested` signal -> `_rpc_move_request`),
+  never positions; the server re-validates with real Player rules and
+  broadcasts `authoritative_state_changed`-driven `_rpc_player_state`
+  (room id + local cell + elevation + facing). Clients predict locally
+  and reconcile on divergence (`_reconcile_local`). Spawn flow:
+  `peer_connected` -> `_rpc_welcome` (spawn + existing players) to the
+  joiner + `_rpc_spawn_player` broadcast; `_rpc_despawn_player` on
+  disconnect.
+- World snapshot sync (Phase A): `WorldSnapshot` (`Scripts/Net/`,
+  RefCounted) is the authoritative world transfer — `build()` on the
+  server serializes `{version, floor_id, layout, connections,
+  room_states}` reusing `FloorSaveSystem.layout_data`,
+  `RoomConnectionManager.serialize_all`, and
+  `RoomSaveSystem.collect_room_state` per room (player position is
+  deliberately excluded — avatars come from the spawn handshake).
+  `apply()` on the client runs `FloorManager.apply_layout_data`
+  (in-memory spec override sharing `_apply_layout_entries` with the
+  layout.json path — never writes disk), `validate_floor`,
+  `materialize_floor`, `deserialize_all`, then
+  `RoomSaveSystem.apply_room_state` per room, and finally
+  `_ensure_player_placement` + `floor_switched` so room-scoped refs
+  rebind. Clients boot via `FloorManager.load_floor_without_save`
+  (definition only — no layout.json override, no manifest check, no
+  room hydration) and skip `apply_saved_player_state`; `WorldBootstrap`
+  blocks all local world saves on clients (`_net_client_readonly`).
+  Transport: reliable JSON chunked (`_rpc_snapshot_begin/chunk/end`,
+  48 KiB chunks, snap_id + index/total, missing-chunk = abort);
+  client replies `_rpc_world_ready`, and ONLY then does the server
+  spawn bodies/avatars (`_pending_peers` + 15 s timeout kicks
+  unacknowledged peers). Readiness gate: `MultiplayerManager.
+  world_synced` gates `request_move` RPC forwarding AND the client's
+  `Player.local_input_locked` (checked inside `_world_ui_blocked`, so
+  no local prediction either) until the snapshot applies; server
+  disconnect re-locks. `--saves=<dir>` redirects `FloorSaveSystem.
+  save_root` for isolated test saves; `--dump-world` prints every
+  room's blocks/contents once (server at boot, client post-sync) —
+  diff the WORLD_DUMP lines to verify replication. `SeedFloorSave.gd`
+  (`-s` script) writes a real motel save with chosen blocks/carpets
+  into a `--root` dir for live tests.
+- Build ops (Phase B1): plain block place/remove is server-authoritative.
+  `BuildOps` (`Scripts/Net/`, static) holds the shared rules:
+  `validate_place`/`validate_remove` (room exists, `has_footprint_cell`,
+  server-recomputed `get_top_z_at` elevation, `BlockLayer.can_place`,
+  player occupancy across ALL player bodies' world cells and the whole
+  footprint, stale-target check for removes, furniture = "unsupported")
+  and `apply_place`/`apply_remove`/`topmost_block`/`find_block`.
+  Clients route `BlockPlacementController.place_at`/`remove_at` through
+  `MultiplayerManager.request_build_place/remove` (gated on
+  `can_request_build()` = CLIENT + connected + world_synced); tiles,
+  carpets and furniture are refused on clients until their phase.
+  Wire: `_rpc_build_place/remove` (any_peer, reliable) carry op_id +
+  room-local cell + object_id (+flip) or target block identity; server
+  dedups per-peer op ids (`_claim_build_op`, 32-entry window), rejects
+  to sender only via `_rpc_build_result(false, reason)`, applies once,
+  then broadcasts `_rpc_build_result(true, payload)` to all clients —
+  clients reproduce via `BuildOps.apply_*` with no re-request.
+  `build_result` signal is the UI feedback hook. Debug args:
+  `--build-place=x,y:id` / `--build-remove=x,y` fire once ~2 s/5 s
+  after sync for headless live tests; `--dump-world=N` delays the
+  WORLD_DUMP by N seconds. Known limits: furniture/carpet/tile mutations
+  still local-only (refused on clients), no floor-switch/room
+  create-delete sync (Phase C), server persistence/autosave deferred
+  (Phase D) — the dedicated server still skips save-on-exit; movement
+  has no interpolation; no auth/encryption.

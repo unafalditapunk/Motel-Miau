@@ -113,6 +113,13 @@ func place_at(coordinates: Vector2i) -> bool:
 	if definition == null:
 		push_error("BlockPlacementController: no object selected.")
 		return false
+	var net := _net_manager()
+	var net_client := net != null and net.mode == MultiplayerManager.Mode.CLIENT
+	# Phase B1: on a multiplayer client ONLY plain block placement is
+	# synchronized. Tiles, carpets and furniture would mutate the local
+	# replica without server authority — refuse them outright.
+	if net_client and not (definition is BlockDefinition):
+		return false
 	if definition is TileDefinition:
 		return room.set_cell_tile(coordinates, definition, block_layer.get_top_z_at(coordinates))
 	if definition is CarpetDefinition:
@@ -124,6 +131,9 @@ func place_at(coordinates: Vector2i) -> bool:
 	if definition is FurnitureDefinition:
 		placed = block_layer.place_furniture(definition, coordinates, elevation, rotation_degrees)
 	elif definition is BlockDefinition:
+		if net_client:
+			return net.request_build_place(room.room_coordinates,
+				coordinates, definition.object_id, flipped)
 		placed = block_layer.place_block(definition, coordinates, elevation)
 	else:
 		push_error("BlockPlacementController: unsupported definition type for '%s'." % definition.object_id)
@@ -178,10 +188,21 @@ func remove_at(coordinates: Vector2i) -> bool:
 			best_z = carpet_z
 			best_priority = 2
 	if kind == 3:
-		return room.clear_cell_carpet(coordinates)
+		# Carpet removal is not synchronized yet (Phase B1 scope).
+		return not _is_net_client() and room.clear_cell_carpet(coordinates)
 	if kind == 2:
-		return room.clear_cell_tile(coordinates)
+		# Tile removal is not synchronized yet (Phase B1 scope).
+		return not _is_net_client() and room.clear_cell_tile(coordinates)
 	if kind == 1 and top_block != null:
+		if _is_net_client():
+			# Only plain blocks sync; furniture stays local-only for now.
+			if top_block.block_definition == null:
+				return false
+			var net := _net_manager()
+			return net != null and net.request_build_remove(
+				room.room_coordinates, coordinates,
+				StringName(top_block.block_id), top_block.grid_position,
+				top_block.elevation)
 		block_layer.remove_block(top_block)
 		return true
 	return false
@@ -227,6 +248,13 @@ func _apply_flip(block: Block) -> void:
 	var sprite := block.get_node_or_null(^"Sprite") as Sprite2D
 	if sprite != null:
 		sprite.flip_h = true
+
+func _net_manager() -> MultiplayerManager:
+	return get_tree().get_first_node_in_group(&"multiplayer_manager") as MultiplayerManager
+
+func _is_net_client() -> bool:
+	var net := _net_manager()
+	return net != null and net.mode == MultiplayerManager.Mode.CLIENT
 
 func _is_player_cell(coordinates: Vector2i) -> bool:
 	var player := get_tree().get_first_node_in_group(&"player") as Player

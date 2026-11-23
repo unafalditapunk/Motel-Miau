@@ -36,7 +36,9 @@ $Tests = @(
     "TileSmokeTest",
     "CarpetSmokeTest",
     "BuildingCatalogSmokeTest",
-    "BuildingUiSmokeTest"
+    "BuildingUiSmokeTest",
+    "WorldSnapshotSmokeTest",
+    "BuildOpsSmokeTest"
 )
 
 if ($Filter -ne "") {
