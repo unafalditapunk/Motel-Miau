@@ -110,7 +110,11 @@ func _can_place_occupant(footprint: Vector2i, height: float, solid: bool, requir
 	if cells.is_empty():
 		return false
 	for cell in cells:
-		if cell.x < 0 or cell.y < 0 or cell.x >= room_size.x or cell.y >= room_size.y:
+		# Footprint-exact: shaped rooms have no cells in bbox holes.
+		if room != null:
+			if not room.has_footprint_cell(cell):
+				return false
+		elif cell.x < 0 or cell.y < 0 or cell.x >= room_size.x or cell.y >= room_size.y:
 			return false
 
 	if solid:

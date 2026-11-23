@@ -158,9 +158,26 @@ func register_room_at(room: Room, room_id: Vector2i, global_origin: Vector2i, fu
 		push_error("Room '%s' already has parent '%s'; add it to this RoomWorld first." % [room.name, room.get_parent().name])
 		return false
 	if not allow_overlapping_rooms:
-		var bounds := Rect2i(global_origin, room.size)
+		# Section-exact overlap: shaped rooms only claim their footprint
+		# cells, not the whole bounding box.
+		var new_sections: Array[Rect2i] = []
+		if room.shape_sections.is_empty():
+			new_sections.append(Rect2i(global_origin, room.size))
+		else:
+			for section in room.shape_sections:
+				new_sections.append(Rect2i(section.position + global_origin, section.size))
 		for other in registry.get_rooms():
-			if other != room and Rect2i(other.cell_origin, other.size).intersects(bounds):
+			if other == room:
+				continue
+			var overlaps := false
+			for new_section in new_sections:
+				for other_section in other.global_sections():
+					if new_section.intersects(other_section):
+						overlaps = true
+						break
+				if overlaps:
+					break
+			if overlaps:
 				push_error("RoomWorld: room '%s' (id %s) at global origin %s size %s overlaps room '%s' (id %s)." % [
 					room.name, room_id, global_origin, room.size, other.name, other.room_coordinates])
 				return false
@@ -309,7 +326,7 @@ func _connect_adjacent_pair(first: Room, second: Room, connection_type: RoomConn
 		for direction in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
 			var other_world: Vector2i = world + direction
 			var other_local: Vector2i = other_world - second.cell_origin
-			if other_local.x >= 0 and other_local.y >= 0 and other_local.x < second.size.x and other_local.y < second.size.y:
+			if second.has_cell(other_local):
 				first_cells.append(cell)
 				second_cells.append(other_local)
 				break
@@ -358,9 +375,9 @@ func create_room(room_coordinates: Vector2i, size := Vector2i.ZERO, floor_colors
 ## Creates a room with an explicit size and global world-grid origin.
 ## room_id is only a unique identifier (used for saves, labels, lookups);
 ## it does not determine the room's position.
-func create_room_at(room_id: Vector2i, global_origin: Vector2i, size := Vector2i.ZERO, floor_colors: Array[Color] = []) -> Room:
+func create_room_at(room_id: Vector2i, global_origin: Vector2i, size := Vector2i.ZERO, floor_colors: Array[Color] = [], shape_sections: Array[Rect2i] = []) -> Room:
 	var dimensions := size if size != Vector2i.ZERO else room_dimensions
-	return _create_room(room_id, global_origin, dimensions, floor_colors)
+	return _create_room(room_id, global_origin, dimensions, floor_colors, [], null, shape_sections)
 
 ## Creates a room fully configured from a RoomDefinition at an explicit
 ## global world-grid origin: size, floor texture, default tile, and the
@@ -387,7 +404,7 @@ func create_room_from_definition(room_id: Vector2i, global_origin: Vector2i, def
 		room.place_carpet(carpet_definition, placement.grid_position, placement.rotation_degrees, false, placement.elevation)
 	return room
 
-func _create_room(room_id: Vector2i, global_origin: Vector2i, dimensions: Vector2i, floor_colors: Array[Color], furniture_placements: Array[Resource] = [], definition: RoomDefinition = null) -> Room:
+func _create_room(room_id: Vector2i, global_origin: Vector2i, dimensions: Vector2i, floor_colors: Array[Color], furniture_placements: Array[Resource] = [], definition: RoomDefinition = null, shape_sections: Array[Rect2i] = []) -> Room:
 	if dimensions.x <= 0 or dimensions.y <= 0:
 		push_error("RoomWorld.create_room requires a positive room size.")
 		return null
@@ -404,6 +421,8 @@ func _create_room(room_id: Vector2i, global_origin: Vector2i, dimensions: Vector
 	if not floor_colors.is_empty():
 		room.floor_colors = floor_colors
 	room.debug_coordinates = debug_coordinates
+	if not shape_sections.is_empty():
+		room.shape_sections = shape_sections.duplicate()
 	add_child(room)
 	if not register_room_at(room, room_id, global_origin, furniture_placements):
 		room.queue_free()

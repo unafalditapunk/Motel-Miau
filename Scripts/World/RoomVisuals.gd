@@ -290,12 +290,19 @@ func _update_neighbor_concealment() -> void:
 	var conceal := primary != null and not primary.show_outside
 	var hidden_set := {}
 	if conceal:
-		var primary_bounds := primary.global_bounds()
+		var primary_sections := primary.global_sections()
 		for other in _room_world.registry.get_rooms():
 			if other == null or other == primary:
 				continue
-			if _rects_adjacent(primary_bounds, other.global_bounds()):
-				hidden_set[other] = true
+			for other_section in other.global_sections():
+				var touches := false
+				for primary_section in primary_sections:
+					if _rects_adjacent(primary_section, other_section):
+						touches = true
+						break
+				if touches:
+					hidden_set[other] = true
+					break
 	for room in _room_world.registry.get_rooms():
 		if room == null:
 			continue

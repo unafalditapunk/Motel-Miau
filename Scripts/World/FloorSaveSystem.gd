@@ -186,6 +186,11 @@ static func save_layout(floor_def: Floor) -> Error:
 		}
 		for color in spec.floor_colors:
 			entry["floor_colors"].append(color.to_html())
+		if not spec.shape_sections.is_empty():
+			var sections: Array = []
+			for section in spec.shape_sections:
+				sections.append([section.position.x, section.position.y, section.size.x, section.size.y])
+			entry["sections"] = sections
 		entries.append(entry)
 	var path := dir.path_join(LAYOUT_NAME)
 	var file := FileAccess.open(path, FileAccess.WRITE)

@@ -276,29 +276,44 @@ func _run_checks() -> void:
 	# Dragging works in every direction: reversed corners give the same rect.
 	_expect(FloorEditor._rect_from_cells(Vector2i(-1, 15), Vector2i(-16, 0)) \
 		== Rect2i(Vector2i(-16, 0), Vector2i(16, 16)), "reversed drag produced wrong rect")
-	_expect(_editor._selection_validity(Rect2i(Vector2i(-16, 0), Vector2i(16, 16))) \
+	_expect(_editor._shape_validity([Rect2i(Vector2i(-16, 0), Vector2i(16, 16))]) \
 		== FloorEditor.SelectionValidity.VALID, "edge-adjacent selection not valid")
-	_expect(_editor._selection_validity(Rect2i(Vector2i(40, 40), Vector2i(8, 8))) \
+	_expect(_editor._shape_validity([Rect2i(Vector2i(40, 40), Vector2i(8, 8))]) \
 		== FloorEditor.SelectionValidity.OVERLAP, "overlapping selection not detected")
-	_expect(_editor._selection_validity(Rect2i(Vector2i.ZERO, Vector2i(2000, 4))) \
+	_expect(_editor._shape_validity([Rect2i(Vector2i.ZERO, Vector2i(2000, 4))]) \
 		== FloorEditor.SelectionValidity.INVALID, "oversized selection not invalid")
-	_expect(_editor._selection_validity(Rect2i(Vector2i(60, 60), Vector2i(1, 5))) \
+	_expect(_editor._shape_validity([Rect2i(Vector2i(60, 60), Vector2i(1, 5))]) \
 		== FloorEditor.SelectionValidity.INVALID, "sub-2-cell axis not invalid")
-	_expect(_editor._selection_validity(Rect2i(Vector2i(48, 0), Vector2i(2, 2))) \
+	_expect(_editor._shape_validity([Rect2i(Vector2i(48, 0), Vector2i(2, 2))]) \
 		== FloorEditor.SelectionValidity.VALID, "small edge-adjacent selection not valid")
-	_expect(_editor._selection_validity(Rect2i(Vector2i(60, 60), Vector2i(8, 8))) \
+	_expect(_editor._shape_validity([Rect2i(Vector2i(60, 60), Vector2i(8, 8))]) \
 		== FloorEditor.SelectionValidity.ISOLATED, "detached selection not flagged")
+
+	# Multi-section shapes: connected unions are valid, disconnected
+	# or self-overlapping ones are not.
+	_expect(_editor._shape_validity([
+			Rect2i(Vector2i(-16, 0), Vector2i(16, 16)),
+			Rect2i(Vector2i(-16, 16), Vector2i(8, 8))]) \
+		== FloorEditor.SelectionValidity.VALID, "connected two-section shape not valid")
+	_expect(_editor._shape_validity([
+			Rect2i(Vector2i(-16, 0), Vector2i(16, 16)),
+			Rect2i(Vector2i(40, 40), Vector2i(8, 8))]) \
+		== FloorEditor.SelectionValidity.DISCONNECTED, "detached sections not flagged")
+	_expect(_editor._shape_validity([
+			Rect2i(Vector2i(-16, 0), Vector2i(16, 16)),
+			Rect2i(Vector2i(-8, 8), Vector2i(8, 8))]) \
+		== FloorEditor.SelectionValidity.OVERLAP, "self-overlapping sections not flagged")
 
 	_drag_cells(Vector2i(-16, 0), Vector2i(-1, 15))
 	_expect(not _editor._dragging, "mouse release did not end the drag")
-	_expect(_editor._pending_rect == Rect2i(Vector2i(-16, 0), Vector2i(16, 16)),
-		"pending rect %s wrong" % _editor._pending_rect)
+	_expect(_editor._pending_sections == [Rect2i(Vector2i(-16, 0), Vector2i(16, 16))],
+		"pending sections %s wrong" % _editor._pending_sections)
 	# Releasing the mouse keeps the selection; X opens the panel.
 	_expect(not _editor._panel_is_open(), "panel opened on mouse release")
 	_editor._unhandled_input(_key(KEY_X))
 	_expect(_editor._panel_is_open(), "X did not open the confirmation panel")
 	_expect(not _editor._panel_create.disabled, "create button disabled for a valid free area")
-	_expect(_editor._panel_info.text.contains("16 x 16"), "panel info missing size: %s" % _editor._panel_info.text)
+	_expect(_editor._panel_info.text.contains("16x16"), "panel info missing bounds: %s" % _editor._panel_info.text)
 	# Room id is auto-assigned and not user-editable.
 	_expect(not _editor._panel_id_edit.editable, "room id field still editable")
 	_expect(_editor._panel_id_edit.text == _editor._next_room_id_label(),
@@ -316,14 +331,14 @@ func _run_checks() -> void:
 	_expect(_editor._panel_status.text.contains("two integers"), "malformed id error not shown")
 	_editor._cancel_pending()
 	_expect(not _editor._panel_is_open(), "cancel did not close the panel")
-	_expect(not _editor._pending_rect.has_area(), "cancel did not clear the pending rect")
+	_expect(_editor._pending_sections.is_empty(), "cancel did not clear the pending sections")
 
-	# Overlapping selection opens the panel on X but disables Create.
+	# A drag that lands on existing rooms is discarded outright: nothing
+	# stays pending and X has no selection to confirm.
 	_drag_cells(Vector2i(40, 40), Vector2i(47, 47))
+	_expect(_editor._pending_sections.is_empty(), "overlapping drag left a pending section")
 	_editor._unhandled_input(_key(KEY_X))
-	_expect(_editor._panel_is_open(), "overlap selection did not open the panel")
-	_expect(_editor._panel_create.disabled, "create enabled for overlapping area")
-	_editor._cancel_pending()
+	_expect(not _editor._panel_is_open(), "panel opened for a discarded overlap drag")
 
 	# Isolated selection (no shared edge) also disables Create.
 	_drag_cells(Vector2i(60, 60), Vector2i(67, 67))
@@ -384,9 +399,12 @@ func _run_checks() -> void:
 	_editor._unhandled_input(_key(KEY_ESCAPE))
 	_expect(not _editor._room_panel_is_open(), "Escape did not close the room panel")
 
-	# Delete the created room: it unregisters and the layout shrinks.
+	# Delete the created room: first press arms the confirm, second deletes.
 	_click_cell(Vector2i(-8, 8))
 	_expect(_editor._room_panel_is_open(), "room panel did not reopen")
+	_editor._on_room_delete()
+	_expect(_room_world.get_room(Vector2i(9, 9)) != null, "room (9,9) deleted without confirm")
+	_expect(_editor._room_panel_status.text.contains("Confirm"), "confirm prompt missing: '%s'" % _editor._room_panel_status.text)
 	_editor._on_room_delete()
 	_expect(_room_world.get_room(Vector2i(9, 9)) == null, "room (9,9) not deleted")
 	_expect(_room_world.registry.get_rooms().size() == room_count_before,

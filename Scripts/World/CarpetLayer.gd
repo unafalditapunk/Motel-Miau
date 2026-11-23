@@ -26,7 +26,7 @@ func _on_cells_changed() -> void:
 
 func _resync_carpets() -> void:
 	_resync_queued = false
-	if room == null or grid == null:
+	if room == null or not is_instance_valid(room) or room.is_queued_for_deletion() or grid == null:
 		return
 	var wanted := {}
 	for coordinates in room.cells:

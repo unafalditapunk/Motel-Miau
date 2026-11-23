@@ -85,7 +85,7 @@ func movement_elevation_for(cell: Vector2i) -> float:
 	return stand_elevation_at(cell)
 
 func can_stand_at(cell: Vector2i) -> bool:
-	if cell.x < 0 or cell.y < 0 or cell.x >= room_size.x or cell.y >= room_size.y:
+	if not _inside_room_bounds(cell):
 		return false
 	if block_layer == null:
 		return true
@@ -93,7 +93,7 @@ func can_stand_at(cell: Vector2i) -> bool:
 	return block_layer.can_actor_stand(cell, surface, height_units) and block_layer.is_standable_surface(cell, surface)
 
 func can_move_to(cell: Vector2i) -> bool:
-	if cell.x < 0 or cell.y < 0 or cell.x >= room_size.x or cell.y >= room_size.y:
+	if not _inside_room_bounds(cell):
 		return false
 	var target_elevation := movement_elevation_for(cell)
 	if absf(target_elevation - elevation) > max_step_height + 0.001:
@@ -135,7 +135,12 @@ func request_move(direction: Vector2i) -> void:
 	_buffered_direction = Vector2i.ZERO
 	_start_move(direction)
 
+## Cell-exact membership: shaped rooms only contain their footprint
+## cells, so bounding-box holes count as outside the room (the player
+## must transition into whatever actually occupies that world cell).
 func _inside_room_bounds(cell: Vector2i) -> bool:
+	if room != null:
+		return room.has_footprint_cell(cell)
 	return cell.x >= 0 and cell.y >= 0 and cell.x < room_size.x and cell.y < room_size.y
 
 func _room_world() -> RoomWorld:
@@ -192,7 +197,7 @@ func evaluate_transition(direction: Vector2i) -> Dictionary:
 			result["reason"] = &"no room beyond boundary"
 			return result
 		dest_local = world_cell - dest_room.cell_origin
-		if dest_local.x < 0 or dest_local.y < 0 or dest_local.x >= dest_room.size.x or dest_local.y >= dest_room.size.y:
+		if not dest_room.has_footprint_cell(dest_local):
 			result["reason"] = &"outside destination room"
 			return result
 	room_world.ensure_room_loaded(dest_room)
@@ -246,7 +251,7 @@ func _try_connection_transition(entry: Dictionary, from_screen: Vector2, from_el
 	if dest_room == null:
 		return false
 	var dest_local: Vector2i = entry["cell"]
-	if dest_local.x < 0 or dest_local.y < 0 or dest_local.x >= dest_room.size.x or dest_local.y >= dest_room.size.y:
+	if not dest_room.has_footprint_cell(dest_local):
 		return false
 	room_world.ensure_room_loaded(dest_room)
 	var surface := 0.0

@@ -23,7 +23,7 @@ enum ViewMode { GRID, ROOMS }
 ## Editing tool: NONE = camera/navigation only, CREATE_ROOM = drag a
 ## rectangle on the global grid to define a new room's bounds.
 enum Tool { NONE, CREATE_ROOM }
-enum SelectionValidity { VALID, OVERLAP, ISOLATED, INVALID }
+enum SelectionValidity { VALID, OVERLAP, ISOLATED, DISCONNECTED, INVALID }
 
 const GROUP := &"floor_editor"
 const HUD_LAYER := 67
@@ -38,6 +38,51 @@ const MAX_ROOM_DIMENSION := 1024
 const MIN_ROOM_DIMENSION := Floor.MIN_ROOM_DIMENSION
 ## Max cells drawn per axis; guards against pathological zoom-outs.
 const MAX_DRAW_AXIS := 1024
+## Cursor-cell hover tiles (iso art): green = free cell, orange =
+## room-occupied cell, red = pending shape is invalid.
+const HOVER_POSITIVE_TEXTURE := preload("res://Assets/Sprites/Hover Tiles/positive_iso.png")
+const HOVER_BLOCKED_TEXTURE := preload("res://Assets/Sprites/Hover Tiles/blocked_iso.png")
+const HOVER_WARNING_TEXTURE := preload("res://Assets/Sprites/Hover Tiles/warning_iso.png")
+## Iso room-outline tiles (green "valid" set). A cell draws one tile:
+## a side tile per exposed edge, a corner tile when two adjacent edges
+## meet. Missing pieces are generated flips of the three authored
+## tiles (down_left_side / left_corner / bottom_corner).
+const ROOM_TILE_UP_LEFT := preload("res://Assets/Sprites/Rooms/up_left_side_valid_iso.png")
+const ROOM_TILE_UP_RIGHT := preload("res://Assets/Sprites/Rooms/up_right_side_valid_iso.png")
+const ROOM_TILE_DOWN_LEFT := preload("res://Assets/Sprites/Rooms/down_left_side_valid_iso.png")
+const ROOM_TILE_DOWN_RIGHT := preload("res://Assets/Sprites/Rooms/down_right_side_valid_iso.png")
+const ROOM_TILE_TOP_CORNER := preload("res://Assets/Sprites/Rooms/top_corner_valid_iso.png")
+const ROOM_TILE_RIGHT_CORNER := preload("res://Assets/Sprites/Rooms/right_corner_valid_iso.png")
+const ROOM_TILE_BOTTOM_CORNER := preload("res://Assets/Sprites/Rooms/bottom_corner_valid_iso.png")
+const ROOM_TILE_LEFT_CORNER := preload("res://Assets/Sprites/Rooms/left_corner_valid_iso.png")
+## Inner (concave) corner marks for reflex vertices — a notch where 3
+## of the 4 cells around a grid vertex are occupied. Only a tiny mark
+## at the vertex; drawn on a neighboring cell that has no edge tile.
+const ROOM_TILE_LEFT_INNER := preload("res://Assets/Sprites/Rooms/left_inner_corner_valid_iso.png")
+const ROOM_TILE_TOP_INNER := preload("res://Assets/Sprites/Rooms/top_inner_corner_valid_iso.png")
+const ROOM_TILE_RIGHT_INNER := preload("res://Assets/Sprites/Rooms/right_inner_corner_valid_iso.png")
+const ROOM_TILE_BOTTOM_INNER := preload("res://Assets/Sprites/Rooms/bottom_inner_corner_valid_iso.png")
+## Blue "room" set for already-placed rooms — same layouts as the
+## green valid set so existing rooms read differently from pending
+## creations. Missing pieces are generated flips like the valid set.
+const ROOM_TILE_UP_LEFT_SET := preload("res://Assets/Sprites/Rooms/up_left_side_room_iso.png")
+const ROOM_TILE_UP_RIGHT_SET := preload("res://Assets/Sprites/Rooms/up_right_side_room_iso.png")
+const ROOM_TILE_DOWN_LEFT_SET := preload("res://Assets/Sprites/Rooms/down_left_side_room_iso.png")
+const ROOM_TILE_DOWN_RIGHT_SET := preload("res://Assets/Sprites/Rooms/down_right_side_room_iso.png")
+const ROOM_TILE_TOP_CORNER_SET := preload("res://Assets/Sprites/Rooms/top_corner_room_iso.png")
+const ROOM_TILE_RIGHT_CORNER_SET := preload("res://Assets/Sprites/Rooms/right_corner_room_iso.png")
+const ROOM_TILE_BOTTOM_CORNER_SET := preload("res://Assets/Sprites/Rooms/bottom_corner_room_iso.png")
+const ROOM_TILE_LEFT_CORNER_SET := preload("res://Assets/Sprites/Rooms/left_corner_room_iso.png")
+const ROOM_TILE_LEFT_INNER_SET := preload("res://Assets/Sprites/Rooms/left_inner_corner_room_iso.png")
+const ROOM_TILE_TOP_INNER_SET := preload("res://Assets/Sprites/Rooms/top_inner_corner_room_iso.png")
+const ROOM_TILE_RIGHT_INNER_SET := preload("res://Assets/Sprites/Rooms/right_inner_corner_room_iso.png")
+const ROOM_TILE_BOTTOM_INNER_SET := preload("res://Assets/Sprites/Rooms/bottom_inner_corner_room_iso.png")
+## Boundary-edge bit flags per cell, mapped from the four grid
+## neighbor directions: -x -> UL, -y -> UR, +x -> LR, +y -> LL.
+const EDGE_UL := 1
+const EDGE_UR := 2
+const EDGE_LR := 4
+const EDGE_LL := 8
 ## Room child nodes hidden in GRID view: the blueprint shows only room
 ## bounds + grid lines. ROOMS view restores everything for inspection.
 const HIDDEN_ROOM_CHILDREN := [&"FloorRenderer", &"TileLayer", &"CarpetLayer",
@@ -63,8 +108,10 @@ var cursor_override := Vector2i.ZERO
 var cursor_override_valid := false
 
 # Create Room tool state. _drag_anchor/_drag_current are inclusive cell
-# corners; _pending_rect is the finished selection awaiting the
-# confirmation panel (kept drawn until resolved or cancelled).
+# corners; _pending_sections holds the committed rect sections of the
+# shape awaiting the confirmation panel (kept drawn until resolved or
+# cancelled). Rooms may be non-rectangular unions of edge-connected
+# sections.
 var _dragging := false
 var _drag_anchor := Vector2i.ZERO
 var _drag_current := Vector2i.ZERO
@@ -72,7 +119,7 @@ var _drag_current := Vector2i.ZERO
 ## tool so rooms can be inspected with Tool.NONE active.
 var _pressing := false
 var _press_cell := Vector2i.ZERO
-var _pending_rect := Rect2i()
+var _pending_sections: Array[Rect2i] = []
 var _panel_layer: CanvasLayer
 var _panel: PanelContainer
 var _panel_id_edit: LineEdit
@@ -90,6 +137,9 @@ var _room_panel_info: Label
 var _room_panel_contents: Label
 var _room_panel_status: Label
 var _room_panel_delete: Button
+## Two-step delete: the first Delete press only arms the button; a
+## second press within the same panel session actually removes the room.
+var _room_delete_armed := false
 var _room_panel_show_from_outside: CheckBox
 var _room_panel_show_outside: CheckBox
 var _room_panel_room: Room = null
@@ -326,6 +376,11 @@ func _handle_editor_key(keycode: Key) -> void:
 		CREATE_TOOL_KEY:
 			_toggle_create_tool()
 			get_viewport().set_input_as_handled()
+		KEY_BACKSPACE:
+			# Undo the last committed section of the pending shape.
+			if not _pending_sections.is_empty():
+				_pending_sections.remove_at(_pending_sections.size() - 1)
+			get_viewport().set_input_as_handled()
 		CONFIRM_KEY:
 			# X confirms the pending selection: an in-progress drag is
 			# finished first, then the confirmation panel opens.
@@ -333,14 +388,14 @@ func _handle_editor_key(keycode: Key) -> void:
 				if _dragging:
 					_dragging = false
 					_finish_drag()
-				if _pending_rect.has_area():
-					_open_panel(_pending_rect)
+				if not _pending_sections.is_empty():
+					_open_panel(_pending_bounds())
 			get_viewport().set_input_as_handled()
 
 func _handle_editor_mouse(mouse_button: InputEventMouseButton) -> void:
 	# Right click cancels an in-progress drag or pending selection.
 	if mouse_button.button_index == MOUSE_BUTTON_RIGHT:
-		if _dragging or _pending_rect.has_area():
+		if _dragging or not _pending_sections.is_empty():
 			_dragging = false
 			_cancel_pending()
 			get_viewport().set_input_as_handled()
@@ -451,7 +506,7 @@ func exit() -> void:
 	tool = Tool.NONE
 	_dragging = false
 	_pressing = false
-	_pending_rect = Rect2i()
+	_pending_sections.clear()
 	_close_panel()
 	_close_room_panel()
 	cursor_cell_valid = false
@@ -522,50 +577,72 @@ func _toggle_create_tool() -> void:
 	if view_mode != ViewMode.GRID:
 		_cycle_view()
 
+## Union bounding box of the pending shape, or an empty rect.
+func _pending_bounds() -> Rect2i:
+	if _pending_sections.is_empty():
+		return Rect2i()
+	var result := _pending_sections[0]
+	for section in _pending_sections.slice(1):
+		result = result.merge(section)
+	return result
+
 ## Current drag rect as an inclusive-cell Rect2i (origin + size), or
-## an empty rect when nothing is being selected.
+## the pending shape's bounds when nothing is being dragged.
 func _selection_rect() -> Rect2i:
 	if tool != Tool.CREATE_ROOM:
 		return Rect2i()
 	if _dragging:
 		return _rect_from_cells(_drag_anchor, _drag_current)
-	if _pending_rect.has_area():
-		return _pending_rect
-	return Rect2i()
+	return _pending_bounds()
 
 static func _rect_from_cells(first: Vector2i, second: Vector2i) -> Rect2i:
 	var min_cell := Vector2i(mini(first.x, second.x), mini(first.y, second.y))
 	var max_cell := Vector2i(maxi(first.x, second.x), maxi(first.y, second.y))
 	return Rect2i(min_cell, max_cell - min_cell + Vector2i.ONE)
 
-## Validity of a candidate rect against the live room layout.
-func _selection_validity(rect: Rect2i) -> SelectionValidity:
-	if rect.size.x < MIN_ROOM_DIMENSION or rect.size.y < MIN_ROOM_DIMENSION \
-			or rect.size.x > MAX_ROOM_DIMENSION or rect.size.y > MAX_ROOM_DIMENSION:
+## Validity of a candidate section list (global cell rects) against the
+## live room layout. Sections must be sized, non-overlapping, edge-
+## connected, cell-clear of existing rooms, and edge-adjacent to an
+## existing room (unless the floor is empty).
+func _shape_validity(sections: Array[Rect2i]) -> SelectionValidity:
+	if sections.is_empty():
 		return SelectionValidity.INVALID
+	var bounds := _pending_bounds_of(sections)
+	if bounds.size.x > MAX_ROOM_DIMENSION or bounds.size.y > MAX_ROOM_DIMENSION:
+		return SelectionValidity.INVALID
+	for section in sections:
+		if section.size.x < MIN_ROOM_DIMENSION or section.size.y < MIN_ROOM_DIMENSION \
+				or section.size.x > MAX_ROOM_DIMENSION or section.size.y > MAX_ROOM_DIMENSION:
+			return SelectionValidity.INVALID
+	for i in range(sections.size()):
+		for j in range(i + 1, sections.size()):
+			if sections[i].intersects(sections[j]):
+				return SelectionValidity.OVERLAP
+	if not FloorManager._sections_connected(sections):
+		return SelectionValidity.DISCONNECTED
 	if _room_world != null:
 		var has_rooms := false
 		for room in _room_world.get_rooms():
 			if room == null:
 				continue
 			has_rooms = true
-			if room.global_bounds().intersects(rect):
-				return SelectionValidity.OVERLAP
-		# Orphan rooms are not allowed: the selection must share an edge
+			for section in sections:
+				for room_section in room.global_sections():
+					if section.intersects(room_section):
+						return SelectionValidity.OVERLAP
+		# Orphan rooms are not allowed: the shape must share an edge
 		# with an existing room. An empty floor accepts its first room.
-		if has_rooms and not _touches_existing_room(rect):
+		if has_rooms and not _shape_touches_existing(sections):
 			return SelectionValidity.ISOLATED
 	return SelectionValidity.VALID
 
-## True when rect shares a full edge segment (not just a corner) with
-## at least one live room's global bounds.
-func _touches_existing_room(rect: Rect2i) -> bool:
-	if _room_world == null:
-		return false
-	for room in _room_world.get_rooms():
-		if room != null and _edges_touch(rect, room.global_bounds()):
-			return true
-	return false
+static func _pending_bounds_of(sections: Array[Rect2i]) -> Rect2i:
+	if sections.is_empty():
+		return Rect2i()
+	var result := sections[0]
+	for section in sections.slice(1):
+		result = result.merge(section)
+	return result
 
 ## Edge adjacency: the rects must touch along a side with positive
 ## overlap on the perpendicular axis — corner contact does not count.
@@ -578,26 +655,101 @@ static func _edges_touch(a: Rect2i, b: Rect2i) -> bool:
 	var stacked := (a_end.y == b.position.y or b_end.y == a.position.y) and x_overlap > 0
 	return side_by_side or stacked
 
+## Total footprint cells of a section list (union, overlaps counted once).
+static func _shape_cell_count(sections: Array[Rect2i]) -> int:
+	var cells := {}
+	for section in sections:
+		for x in range(section.position.x, section.end.x):
+			for y in range(section.position.y, section.end.y):
+				cells[Vector2i(x, y)] = true
+	return cells.size()
+
+## True when any section shares a full edge segment (not just a corner)
+## with at least one live room's footprint sections.
+func _shape_touches_existing(sections: Array[Rect2i]) -> bool:
+	if _room_world == null:
+		return false
+	for room in _room_world.get_rooms():
+		if room == null:
+			continue
+		for room_section in room.global_sections():
+			for section in sections:
+				if _edges_touch(section, room_section):
+					return true
+	return false
+
+## Why a new drag rect cannot extend the pending shape, or "" when it
+## can. The section must be sized, edge-connected to the pending union,
+## and cell-clear of both the pending sections and existing rooms.
+func _section_add_error(rect: Rect2i) -> String:
+	if rect.size.x < MIN_ROOM_DIMENSION or rect.size.y < MIN_ROOM_DIMENSION \
+			or rect.size.x > MAX_ROOM_DIMENSION or rect.size.y > MAX_ROOM_DIMENSION:
+		return "size must be %d-%d cells per axis" % [MIN_ROOM_DIMENSION, MAX_ROOM_DIMENSION]
+	var touches_pending := false
+	for section in _pending_sections:
+		if rect.intersects(section):
+			return "overlaps the pending shape"
+		if _edges_touch(rect, section):
+			touches_pending = true
+	if not touches_pending:
+		return "must share an edge with the pending shape"
+	if _room_world != null:
+		var overlap_id := _rect_overlapping_room(rect)
+		if overlap_id.x != -2147483648:
+			return "overlaps room %s" % _id_label(overlap_id)
+	return ""
+
+## First room id whose footprint sections intersect the rect, or the
+## sentinel Vector2i when the rect is cell-clear of every room.
+func _rect_overlapping_room(rect: Rect2i) -> Vector2i:
+	const NONE := Vector2i(-2147483648, -2147483648)
+	if _room_world == null:
+		return NONE
+	for room in _room_world.get_rooms():
+		if room == null:
+			continue
+		for room_section in room.global_sections():
+			if rect.intersects(room_section):
+				return room.room_coordinates
+	return NONE
+
 func _finish_drag() -> void:
 	var rect := _rect_from_cells(_drag_anchor, _drag_current)
 	if not rect.has_area():
 		return
-	# Releasing the mouse only keeps the selection; X opens the panel.
-	_pending_rect = rect
+	# A drag that lands on existing rooms is discarded outright — there
+	# is no valid room to build there, so nothing stays pending.
+	if _rect_overlapping_room(rect).x != -2147483648:
+		_set_notice("Section overlaps an existing room — discarded.")
+		return
+	if _pending_sections.is_empty():
+		# First section is kept even when invalid so X can open the
+		# panel and show why Create is disabled.
+		_pending_sections = [rect]
+		return
+	# Later drags extend the shape; invalid additions are rejected
+	# immediately with feedback instead of corrupting the pending union.
+	var reason := _section_add_error(rect)
+	if reason != "":
+		_set_notice("Section rejected: %s" % reason)
+		return
+	_pending_sections.append(rect)
 
 func _panel_is_open() -> bool:
 	return _panel_layer != null and _panel_layer.visible
 
-func _open_panel(rect: Rect2i) -> void:
+func _open_panel(_rect: Rect2i) -> void:
 	if _panel == null:
 		return
-	_panel_info.text = "Size: %d x %d   Origin: (%d, %d)" % [
-		rect.size.x, rect.size.y, rect.position.x, rect.position.y]
+	var bounds := _pending_bounds()
+	_panel_info.text = "Sections: %d   Cells: %d   Bounds: %dx%d at (%d, %d)" % [
+		_pending_sections.size(), _shape_cell_count(_pending_sections),
+		bounds.size.x, bounds.size.y, bounds.position.x, bounds.position.y]
 	_panel_id_edit.text = _next_room_id_label()
 	_panel_id_edit.editable = false
 	_panel_show_from_outside.button_pressed = true
 	_panel_show_outside.button_pressed = true
-	_refresh_panel_status(rect)
+	_refresh_panel_status()
 	_panel_layer.visible = true
 
 func _close_panel() -> void:
@@ -606,7 +758,7 @@ func _close_panel() -> void:
 
 ## Cancels the pending selection and its confirmation panel.
 func _cancel_pending() -> void:
-	_pending_rect = Rect2i()
+	_pending_sections.clear()
 	_close_panel()
 
 # ------------------------------------------------------------------
@@ -620,6 +772,7 @@ func _close_room_panel() -> void:
 	if _room_panel_layer != null:
 		_room_panel_layer.visible = false
 	_room_panel_room = null
+	_room_delete_armed = false
 
 ## LMB press+release on the same cell inspects the room there.
 func _handle_room_click() -> void:
@@ -634,10 +787,13 @@ func _open_room_panel(room: Room) -> void:
 	if room == null or _room_panel == null:
 		return
 	_room_panel_room = room
+	_room_delete_armed = false
+	_room_panel_delete.text = "Delete"
 	var bounds := room.global_bounds()
-	_room_panel_info.text = "ID %s   Origin (%d, %d)   Size %dx%d   Options: %s/%s" % [
+	var shape_text := "" if room.shape_sections.is_empty() else "   Sections: %d" % room.shape_sections.size()
+	_room_panel_info.text = "ID %s   Origin (%d, %d)   Size %dx%d%s   Options: %s/%s" % [
 		_id_label(room.room_coordinates), bounds.position.x, bounds.position.y,
-		bounds.size.x, bounds.size.y,
+		bounds.size.x, bounds.size.y, shape_text,
 		"outside" if room.show_from_outside else "hidden",
 		"reveals" if room.show_outside else "conceals"]
 	var counts: Dictionary = room.placed_content_counts()
@@ -689,6 +845,13 @@ func _on_room_delete() -> void:
 		_close_room_panel()
 		return
 	var room_id: Vector2i = _room_panel_room.room_coordinates
+	if not _room_delete_armed:
+		_room_delete_armed = true
+		_room_panel_delete.text = "Confirm"
+		_room_panel_status.text = "Click Confirm to permanently delete room %s." % _id_label(room_id)
+		return
+	_room_delete_armed = false
+	_room_panel_delete.text = "Delete"
 	if floor_manager.remove_room_from_active_floor(room_id):
 		_set_notice("Room %s deleted." % _id_label(room_id))
 		_room_panel_room = null
@@ -697,18 +860,21 @@ func _on_room_delete() -> void:
 		var verdict := floor_manager.can_delete_room(room_id)
 		_room_panel_status.text = "Delete failed: %s" % str(verdict.get("reason", "unknown"))
 
-func _refresh_panel_status(rect: Rect2i) -> void:
+func _refresh_panel_status() -> void:
 	if _panel_status == null:
 		return
-	match _selection_validity(rect):
+	match _shape_validity(_pending_sections):
 		SelectionValidity.VALID:
 			_panel_status.text = "Area is free."
 			_panel_create.disabled = false
 		SelectionValidity.OVERLAP:
-			_panel_status.text = "Overlaps an existing room."
+			_panel_status.text = "Overlaps an existing room or another section."
 			_panel_create.disabled = true
 		SelectionValidity.ISOLATED:
 			_panel_status.text = "Must share an edge with an existing room."
+			_panel_create.disabled = true
+		SelectionValidity.DISCONNECTED:
+			_panel_status.text = "Sections must form one connected shape."
 			_panel_create.disabled = true
 		SelectionValidity.INVALID:
 			_panel_status.text = "Invalid size: rooms need at least %dx%d and at most %d per axis." % [
@@ -716,7 +882,7 @@ func _refresh_panel_status(rect: Rect2i) -> void:
 			_panel_create.disabled = true
 
 func _on_panel_create() -> void:
-	if not _pending_rect.has_area():
+	if _pending_sections.is_empty():
 		_close_panel()
 		return
 	var parsed: Variant = _parse_room_id(_panel_id_edit.text)
@@ -727,10 +893,12 @@ func _on_panel_create() -> void:
 	if _room_id_in_use(room_id):
 		_panel_status.text = "Room ID %s is already used." % _id_label(room_id)
 		return
+	var bounds := _pending_bounds()
 	var spec := FloorRoomSpec.new()
 	spec.room_id = room_id
-	spec.global_origin = _pending_rect.position
-	spec.size = _pending_rect.size
+	spec.shape_sections = _pending_sections.duplicate()
+	spec.global_origin = bounds.position
+	spec.size = bounds.size
 	spec.show_from_outside = _panel_show_from_outside.button_pressed
 	spec.show_outside = _panel_show_outside.button_pressed
 	var floor_manager := _floor_manager()
@@ -741,10 +909,10 @@ func _on_panel_create() -> void:
 	if room == null:
 		_panel_status.text = "Creation rejected (overlap or invalid room)."
 		return
-	_set_notice("Room created: %s at (%d, %d) %dx%d" % [
+	_set_notice("Room created: %s at (%d, %d) %dx%d (%d section(s))" % [
 		_id_label(room_id), spec.global_origin.x, spec.global_origin.y,
-		spec.size.x, spec.size.y])
-	_pending_rect = Rect2i()
+		spec.size.x, spec.size.y, _pending_sections.size()])
+	_pending_sections.clear()
 	_close_panel()
 	# Recenter on the new room so the player sees the result.
 	if _camera != null:
@@ -847,11 +1015,12 @@ func _update_hud() -> void:
 			"grid" if view_mode == ViewMode.GRID else "rooms"),
 	]
 	if tool == Tool.CREATE_ROOM:
-		lines.append("[C] select tool  LMB drag: new room  [X] confirm  RMB/Esc: cancel")
+		lines.append("[C] select tool  LMB drag: add section  [X] confirm  [Bksp] undo  RMB/Esc: cancel")
 		var rect := _selection_rect()
 		if rect.has_area():
-			lines.append("Selection: %dx%d at (%d, %d)" % [
-				rect.size.x, rect.size.y, rect.position.x, rect.position.y])
+			var section_count := _pending_sections.size() + (1 if _dragging else 0)
+			lines.append("Shape: %d section(s), bounds %dx%d at (%d, %d)" % [
+				section_count, rect.size.x, rect.size.y, rect.position.x, rect.position.y])
 			if not _dragging and not _panel_is_open():
 				lines.append("Press [X] to place it, RMB/Esc to cancel")
 	else:
@@ -929,27 +1098,16 @@ func _draw_grid_lines(cell_range: Rect2i) -> void:
 		var b := _grid.grid_to_screen_position(Vector2(x1, v), 0.0)
 		draw_line(a, b, line_color, 1.0)
 
-## Filled + outlined iso polygon for each registered room's global
-## bounds, plus its room id at the centroid.
+## Iso tile outline for each registered room's footprint plus its
+## room id at the centroid. Shaped rooms draw their union outline;
+## rectangular rooms get the same tiles via a single section.
 func _draw_room_bounds() -> void:
-	var fill := Color(0.35, 0.75, 1.0, 0.10)
-	var border := Color(0.45, 0.85, 1.0, 0.6)
 	var font := ThemeDB.fallback_font
 	for room in _room_world.get_rooms():
 		if room == null:
 			continue
 		var bounds := room.global_bounds()
-		# Half-integer corners: the outline hugs the outer edges of the
-		# boundary cells' diamonds, not their centers.
-		var x0 := float(bounds.position.x) - 0.5
-		var y0 := float(bounds.position.y) - 0.5
-		var x1 := float(bounds.end.x) - 0.5
-		var y1 := float(bounds.end.y) - 0.5
-		var points := PackedVector2Array()
-		for corner in [Vector2(x0, y0), Vector2(x1, y0), Vector2(x1, y1), Vector2(x0, y1)]:
-			points.append(_grid.grid_to_screen_position(corner, 0.0))
-		draw_colored_polygon(points, fill)
-		draw_polyline(points + PackedVector2Array([points[0]]), border, 1.5)
+		_draw_shape_tiles(room.global_sections(), Color(1.0, 1.0, 1.0, 0.9), true)
 		if font != null:
 			var center := _grid.grid_to_screen_position(
 				Vector2(bounds.position) + Vector2(bounds.size) * 0.5, 0.0)
@@ -957,46 +1115,9 @@ func _draw_room_bounds() -> void:
 				room.room_coordinates.x, room.room_coordinates.y],
 				HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.8, 0.95, 1.0, 0.85))
 
-func _draw_cursor_cell() -> void:
-	if not cursor_cell_valid:
-		return
-	var occupied := _room_world.get_room_at_world_cell(cursor_cell) != null
-	var color := Color(1.0, 0.55, 0.35, 0.35) if occupied else Color(0.4, 1.0, 0.5, 0.30)
-	# Diamond centered on the cell anchor (half-integer corners) — same
-	# shape the room floor/tile rendering uses, so hover matches visuals.
-	var x := float(cursor_cell.x)
-	var y := float(cursor_cell.y)
-	var points := PackedVector2Array()
-	for corner in [Vector2(x - 0.5, y - 0.5), Vector2(x + 0.5, y - 0.5),
-			Vector2(x + 0.5, y + 0.5), Vector2(x - 0.5, y + 0.5)]:
-		points.append(_grid.grid_to_screen_position(corner, 0.0))
-	draw_colored_polygon(points, color)
-	draw_polyline(points + PackedVector2Array([points[0]]),
-		color.lightened(0.3), 1.5)
-
-## Live drag preview plus the finished selection awaiting confirmation.
-## Same half-integer corner convention as room bounds so the preview
-## aligns exactly with the room that will be created.
-func _draw_selection_preview() -> void:
-	var rect := _selection_rect()
-	if not rect.has_area():
-		return
-	var validity := _selection_validity(rect)
-	var fill: Color
-	var border: Color
-	match validity:
-		SelectionValidity.VALID:
-			fill = Color(0.35, 1.0, 0.55, 0.18)
-			border = Color(0.45, 1.0, 0.6, 0.9)
-		SelectionValidity.OVERLAP:
-			fill = Color(1.0, 0.6, 0.25, 0.20)
-			border = Color(1.0, 0.65, 0.3, 0.9)
-		SelectionValidity.ISOLATED:
-			fill = Color(1.0, 0.85, 0.25, 0.20)
-			border = Color(1.0, 0.9, 0.35, 0.9)
-		SelectionValidity.INVALID:
-			fill = Color(1.0, 0.3, 0.3, 0.20)
-			border = Color(1.0, 0.35, 0.35, 0.9)
+## Filled + outlined iso polygon for one global cell rect, using the
+## half-integer corner convention shared by rooms and the grid.
+func _draw_section_poly(rect: Rect2i, fill: Color, border: Color, width: float) -> void:
 	var x0 := float(rect.position.x) - 0.5
 	var y0 := float(rect.position.y) - 0.5
 	var x1 := float(rect.end.x) - 0.5
@@ -1005,16 +1126,203 @@ func _draw_selection_preview() -> void:
 	for corner in [Vector2(x0, y0), Vector2(x1, y0), Vector2(x1, y1), Vector2(x0, y1)]:
 		points.append(_grid.grid_to_screen_position(corner, 0.0))
 	draw_colored_polygon(points, fill)
-	var width := 2.5 if _pending_rect == rect and not _dragging else 1.5
 	draw_polyline(points + PackedVector2Array([points[0]]), border, width)
+
+## Iso tile outline for a set of global cell sections: every cell whose
+## boundary-edge pattern is a single edge or two adjacent edges draws
+## the matching tile; interior and complex-edge cells draw nothing
+## (callers keep a polygon underlay for those). Sections may overlap;
+## cells are unioned so shared edges stay hidden.
+func _draw_shape_tiles(sections: Array, tint: Color, for_rooms := false) -> void:
+	var cells := {}
+	for section in sections:
+		for y in range(section.position.y, section.end.y):
+			for x in range(section.position.x, section.end.x):
+				cells[Vector2i(x, y)] = true
+	var masks := {}
+	for cell in cells:
+		masks[cell] = _boundary_mask(cell, cells)
+	_draw_inner_corner_marks(cells, masks, tint, for_rooms)
+	for cell in cells:
+		var texture := _edge_tile_for_mask(masks[cell], for_rooms)
+		if texture == null:
+			continue
+		var center := _grid.grid_to_screen_position(Vector2(cell), 0.0)
+		draw_texture(texture, center - Vector2(texture.get_size()) * 0.5, tint)
+
+## Boundary-edge bitmask for one cell: a bit is set when the neighbor
+## in that grid direction is absent from the shape.
+func _boundary_mask(cell: Vector2i, cells: Dictionary) -> int:
+	var mask := 0
+	if not cells.has(cell + Vector2i(-1, 0)):
+		mask |= EDGE_UL
+	if not cells.has(cell + Vector2i(0, -1)):
+		mask |= EDGE_UR
+	if not cells.has(cell + Vector2i(1, 0)):
+		mask |= EDGE_LR
+	if not cells.has(cell + Vector2i(0, 1)):
+		mask |= EDGE_LL
+	return mask
+
+## Side/corner tile for a boundary mask, or null for masks with no
+## dedicated tile (interior, opposite edges, 3-edge cells).
+func _edge_tile_for_mask(mask: int, for_rooms := false) -> Texture2D:
+	if mask == EDGE_UL:
+		return ROOM_TILE_UP_LEFT_SET if for_rooms else ROOM_TILE_UP_LEFT
+	if mask == EDGE_UR:
+		return ROOM_TILE_UP_RIGHT_SET if for_rooms else ROOM_TILE_UP_RIGHT
+	if mask == EDGE_LR:
+		return ROOM_TILE_DOWN_RIGHT_SET if for_rooms else ROOM_TILE_DOWN_RIGHT
+	if mask == EDGE_LL:
+		return ROOM_TILE_DOWN_LEFT_SET if for_rooms else ROOM_TILE_DOWN_LEFT
+	if mask == (EDGE_UL | EDGE_UR):
+		return ROOM_TILE_TOP_CORNER_SET if for_rooms else ROOM_TILE_TOP_CORNER
+	if mask == (EDGE_UR | EDGE_LR):
+		return ROOM_TILE_RIGHT_CORNER_SET if for_rooms else ROOM_TILE_RIGHT_CORNER
+	if mask == (EDGE_LL | EDGE_LR):
+		return ROOM_TILE_BOTTOM_CORNER_SET if for_rooms else ROOM_TILE_BOTTOM_CORNER
+	if mask == (EDGE_UL | EDGE_LL):
+		return ROOM_TILE_LEFT_CORNER_SET if for_rooms else ROOM_TILE_LEFT_CORNER
+	return null
+
+## Concave (reflex) vertices: exactly 3 of the 4 cells around a grid
+## vertex are occupied, so the outline turns inward. The inner-corner
+## mark is drawn on an occupied neighbor cell whose own mask has no
+## edge tile, so the two opaque tiles never overlap.
+func _draw_inner_corner_marks(cells: Dictionary, masks: Dictionary, tint: Color, for_rooms := false) -> void:
+	var reflex := {}
+	for cell: Vector2i in cells:
+		var x := cell.x
+		var y := cell.y
+		# Doubled-int vertex key -> the 4 cells touching that vertex.
+		var verts := {
+			Vector2i(2 * x - 1, 2 * y - 1): [cell, cell + Vector2i(-1, 0),
+				cell + Vector2i(0, -1), cell + Vector2i(-1, -1)],
+			Vector2i(2 * x + 1, 2 * y - 1): [cell, cell + Vector2i(0, -1),
+				cell + Vector2i(1, 0), cell + Vector2i(1, -1)],
+			Vector2i(2 * x + 1, 2 * y + 1): [cell, cell + Vector2i(1, 0),
+				cell + Vector2i(0, 1), cell + Vector2i(1, 1)],
+			Vector2i(2 * x - 1, 2 * y + 1): [cell, cell + Vector2i(-1, 0),
+				cell + Vector2i(0, 1), cell + Vector2i(-1, 1)],
+		}
+		for v in verts:
+			if reflex.has(v):
+				continue
+			var present := 0
+			for c in verts[v]:
+				if cells.has(c):
+					present += 1
+			if present == 3:
+				reflex[v] = verts[v]
+	for v in reflex:
+		var draw_cell := _inner_mark_cell(reflex[v], masks)
+		if draw_cell.x == -2147483648:
+			continue
+		var texture := _inner_tile_for_vertex(v, draw_cell, for_rooms)
+		if texture == null:
+			continue
+		var center := _grid.grid_to_screen_position(Vector2(draw_cell), 0.0)
+		draw_texture(texture, center - Vector2(texture.get_size()) * 0.5, tint)
+
+## Picks an occupied cell around reflex vertex v whose boundary mask
+## draws no edge tile (so the opaque inner mark cannot overdraw one).
+## Returns the sentinel when every candidate already shows a tile.
+func _inner_mark_cell(candidates: Array, masks: Dictionary) -> Vector2i:
+	const NONE := Vector2i(-2147483648, -2147483648)
+	for c in candidates:
+		if masks.has(c) and _edge_tile_for_mask(masks[c]) == null:
+			return c
+	return NONE
+
+## Inner-corner tile whose mark vertex coincides with reflex vertex v
+## when the tile is centered on draw_cell.
+func _inner_tile_for_vertex(v: Vector2i, draw_cell: Vector2i, for_rooms := false) -> Texture2D:
+	if v == Vector2i(2 * draw_cell.x - 1, 2 * draw_cell.y - 1):
+		return ROOM_TILE_TOP_INNER_SET if for_rooms else ROOM_TILE_TOP_INNER
+	if v == Vector2i(2 * draw_cell.x + 1, 2 * draw_cell.y - 1):
+		return ROOM_TILE_RIGHT_INNER_SET if for_rooms else ROOM_TILE_RIGHT_INNER
+	if v == Vector2i(2 * draw_cell.x + 1, 2 * draw_cell.y + 1):
+		return ROOM_TILE_BOTTOM_INNER_SET if for_rooms else ROOM_TILE_BOTTOM_INNER
+	if v == Vector2i(2 * draw_cell.x - 1, 2 * draw_cell.y + 1):
+		return ROOM_TILE_LEFT_INNER_SET if for_rooms else ROOM_TILE_LEFT_INNER
+	return null
+
+## Iso hover tile under the cursor: the pending shape's validity wins
+## (invalid union -> warning tile), then room occupancy (blocked tile),
+## otherwise the free-cell tile. Same idea as RoomHoverHighlight's
+## normal/construction tiles, but state-driven for editing.
+func _draw_cursor_cell() -> void:
+	if not cursor_cell_valid:
+		return
+	var texture := _hover_texture_for_cursor()
+	if texture == null:
+		return
+	var center := _grid.grid_to_screen_position(Vector2(cursor_cell), 0.0)
+	draw_texture(texture, center - Vector2(texture.get_size()) * 0.5)
+
+func _hover_texture_for_cursor() -> Texture2D:
+	if tool == Tool.CREATE_ROOM and (_dragging or not _pending_sections.is_empty()):
+		var candidate := _pending_sections.duplicate()
+		if _dragging:
+			candidate.append(_rect_from_cells(_drag_anchor, _drag_current))
+		if _shape_validity(candidate) != SelectionValidity.VALID:
+			return HOVER_WARNING_TEXTURE
+	if _room_world != null and _room_world.get_room_at_world_cell(cursor_cell) != null:
+		return HOVER_BLOCKED_TEXTURE
+	return HOVER_POSITIVE_TEXTURE
+
+## Pending shape preview: a valid union draws the green iso room
+## tiles (shared edges between sections stay hidden); invalid states
+## keep the colored polygon fallback until their art exists.
+func _draw_selection_preview() -> void:
+	if tool != Tool.CREATE_ROOM:
+		return
+	var drag_rect := Rect2i()
+	var has_drag := _dragging and _rect_from_cells(_drag_anchor, _drag_current).has_area()
+	if has_drag:
+		drag_rect = _rect_from_cells(_drag_anchor, _drag_current)
+	var preview_sections := _pending_sections.duplicate()
+	if has_drag:
+		preview_sections.append(drag_rect)
+	if preview_sections.is_empty():
+		return
+	var validity := _shape_validity(preview_sections)
+	if validity == SelectionValidity.VALID:
+		_draw_shape_tiles(preview_sections, Color(1.0, 1.0, 1.0, 0.7))
+	else:
+		var committed_fill := Color(0.35, 1.0, 0.55, 0.10)
+		var committed_border := Color(0.45, 1.0, 0.6, 0.9)
+		for section in _pending_sections:
+			_draw_section_poly(section, committed_fill, committed_border, 2.5)
+		if has_drag:
+			var fill: Color
+			var border: Color
+			match validity:
+				SelectionValidity.OVERLAP:
+					fill = Color(1.0, 0.6, 0.25, 0.20)
+					border = Color(1.0, 0.65, 0.3, 0.9)
+				SelectionValidity.ISOLATED, SelectionValidity.DISCONNECTED:
+					fill = Color(1.0, 0.85, 0.25, 0.20)
+					border = Color(1.0, 0.9, 0.35, 0.9)
+				SelectionValidity.INVALID:
+					fill = Color(1.0, 0.3, 0.3, 0.20)
+					border = Color(1.0, 0.35, 0.35, 0.9)
+				_:
+					fill = committed_fill
+					border = committed_border
+			_draw_section_poly(drag_rect, fill, border, 1.5)
+	if not has_drag:
+		return
 	var font := ThemeDB.fallback_font
 	if font != null:
 		var center := _grid.grid_to_screen_position(
-			Vector2(rect.position) + Vector2(rect.size) * 0.5, 0.0)
+			Vector2(drag_rect.position) + Vector2(drag_rect.size) * 0.5, 0.0)
 		var status := "valid" if validity == SelectionValidity.VALID else \
 			("overlap" if validity == SelectionValidity.OVERLAP else \
-			("isolated" if validity == SelectionValidity.ISOLATED else "invalid"))
+			("isolated" if validity == SelectionValidity.ISOLATED else \
+			("disconnected" if validity == SelectionValidity.DISCONNECTED else "invalid")))
 		draw_string(font, center + Vector2(-30.0, 4.0),
-			"%dx%d  (%d, %d)  %s" % [rect.size.x, rect.size.y,
-				rect.position.x, rect.position.y, status],
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 11, border)
+			"%dx%d  (%d, %d)  %s" % [drag_rect.size.x, drag_rect.size.y,
+				drag_rect.position.x, drag_rect.position.y, status],
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 11,
+			Color(0.45, 1.0, 0.6, 0.9))

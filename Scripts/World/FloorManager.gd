@@ -110,6 +110,11 @@ func validate_floor(floor_def: Floor) -> Array[String]:
 		var size := _resolved_spec_size(spec)
 		if size == Vector2i.ZERO or size.x <= 0 or size.y <= 0:
 			problems.append("room %s has no resolvable size" % spec.room_id)
+		var own := _spec_sections(spec)
+		for i in range(own.size()):
+			for j in range(i + 1, own.size()):
+				if own[i].intersects(own[j]):
+					problems.append("room %s has overlapping shape sections" % spec.room_id)
 	if floor_def.rooms.is_empty():
 		problems.append("floor has no rooms")
 	if not seen.has(floor_def.entry_room_id):
@@ -117,9 +122,11 @@ func validate_floor(floor_def: Floor) -> Array[String]:
 	var bounds := _spec_bounds(floor_def)
 	for i in range(bounds.size()):
 		for j in range(i + 1, bounds.size()):
-			if (bounds[i] as Rect2i).intersects(bounds[j]):
-				problems.append("room specs at %s and %s have overlapping world bounds" % [
-					(bounds[i] as Rect2i).position, (bounds[j] as Rect2i).position])
+			var spec_a: FloorRoomSpec = bounds[i][0]
+			var spec_b: FloorRoomSpec = bounds[j][0]
+			if _sections_overlap(_spec_sections(spec_a), _spec_sections(spec_b)):
+				problems.append("room specs %s and %s have overlapping cells" % [
+					_id_text(spec_a.room_id), _id_text(spec_b.room_id)])
 	for connection in floor_def.connections:
 		if connection == null:
 			problems.append("null connection")
@@ -130,22 +137,90 @@ func validate_floor(floor_def: Floor) -> Array[String]:
 			problems.append("connection '%s' references missing destination room %s" % [connection.connection_id, connection.destination_room_id])
 	return problems
 
-## Resolved world-cell bounds (origin + size) for every spec whose size
-## can be determined; used for overlap validation.
-func _spec_bounds(floor_def: Floor) -> Array[Rect2i]:
-	var bounds: Array[Rect2i] = []
+## Specs with a resolvable footprint, paired with their union bounds
+## Rect2i — used for pairwise overlap validation.
+func _spec_bounds(floor_def: Floor) -> Array:
+	var bounds: Array = []
 	for spec in floor_def.rooms:
 		if spec == null:
 			continue
-		var size := _resolved_spec_size(spec)
-		if size == Vector2i.ZERO:
+		var footprint := spec.bounds()
+		if footprint.size == Vector2i.ZERO or footprint.size.x <= 0 or footprint.size.y <= 0:
 			continue
-		bounds.append(Rect2i(spec.global_origin, size))
+		bounds.append([spec, footprint])
 	return bounds
+
+## Global cell rects that make up a spec's footprint: its stored
+## shape_sections, or the single global_origin+size rectangle.
+static func _spec_sections(spec: FloorRoomSpec) -> Array[Rect2i]:
+	if spec == null:
+		return []
+	if not spec.shape_sections.is_empty():
+		return spec.shape_sections.duplicate()
+	var size := _resolved_spec_size(spec)
+	if size == Vector2i.ZERO:
+		return []
+	return [Rect2i(spec.global_origin, size)]
+
+## Union bounding box of a list of global cell rects.
+static func _sections_bounds(sections: Array[Rect2i]) -> Rect2i:
+	if sections.is_empty():
+		return Rect2i()
+	var result := sections[0]
+	for section in sections.slice(1):
+		result = result.merge(section)
+	return result
+
+## True when any section rect of A intersects any of B — exact for
+## cell unions since rect intersection means shared cells.
+static func _sections_overlap(a: Array[Rect2i], b: Array[Rect2i]) -> bool:
+	for ra in a:
+		for rb in b:
+			if ra.intersects(rb):
+				return true
+	return false
+
+## True when any section of A shares an edge segment with any section
+## of B — exact for cell unions (a cell-edge adjacency always lies on
+## a section boundary pair).
+static func _sections_share_edge(a: Array[Rect2i], b: Array[Rect2i]) -> bool:
+	for ra in a:
+		for rb in b:
+			if _specs_share_edge(ra, rb):
+				return true
+	return false
+
+## True when the section union is one edge-connected piece: sections
+## linked by overlap or shared edge form a single component.
+static func _sections_connected(sections: Array[Rect2i]) -> bool:
+	if sections.size() <= 1:
+		return true
+	var linked := {}
+	for i in range(sections.size()):
+		var neighbors: Array[int] = []
+		for j in range(sections.size()):
+			if i == j:
+				continue
+			if sections[i].intersects(sections[j]) or _specs_share_edge(sections[i], sections[j]):
+				neighbors.append(j)
+		linked[i] = neighbors
+	var seen := {0: true}
+	var frontier: Array[int] = [0]
+	while not frontier.is_empty():
+		var next: Array[int] = []
+		for node in frontier:
+			for other in linked[node]:
+				if not seen.has(other):
+					seen[other] = true
+					next.append(other)
+		frontier = next
+	return seen.size() == sections.size()
 
 static func _resolved_spec_size(spec: FloorRoomSpec) -> Vector2i:
 	if spec == null:
 		return Vector2i.ZERO
+	if not spec.shape_sections.is_empty():
+		return _sections_bounds(spec.shape_sections).size
 	if spec.size != Vector2i.ZERO:
 		return spec.size
 	if spec.room_definition != null:
@@ -375,13 +450,27 @@ func add_room_to_active_floor(spec: FloorRoomSpec) -> Room:
 	if floor_def == null or world == null or spec == null:
 		push_error("FloorManager.add_room_to_active_floor requires an active floor, a RoomWorld, and a spec.")
 		return null
-	var size := _resolved_spec_size(spec)
-	if size == Vector2i.ZERO or size.x <= 0 or size.y <= 0:
+	var sections := _spec_sections(spec)
+	if sections.is_empty():
 		push_error("FloorManager.add_room_to_active_floor: room %s has no resolvable size." % spec.room_id)
 		return null
-	if size.x < Floor.MIN_ROOM_DIMENSION or size.y < Floor.MIN_ROOM_DIMENSION:
-		push_error("FloorManager.add_room_to_active_floor: room %s size %s is below the %dx%d minimum." % [
-			spec.room_id, size, Floor.MIN_ROOM_DIMENSION, Floor.MIN_ROOM_DIMENSION])
+	var bounds := _sections_bounds(sections)
+	if bounds.size.x < Floor.MIN_ROOM_DIMENSION or bounds.size.y < Floor.MIN_ROOM_DIMENSION:
+		push_error("FloorManager.add_room_to_active_floor: room %s bounds %s are below the %dx%d minimum." % [
+			spec.room_id, bounds.size, Floor.MIN_ROOM_DIMENSION, Floor.MIN_ROOM_DIMENSION])
+		return null
+	for section in sections:
+		if section.size.x < Floor.MIN_ROOM_DIMENSION or section.size.y < Floor.MIN_ROOM_DIMENSION:
+			push_error("FloorManager.add_room_to_active_floor: room %s section %s is below the %dx%d minimum." % [
+				spec.room_id, section, Floor.MIN_ROOM_DIMENSION, Floor.MIN_ROOM_DIMENSION])
+			return null
+	for i in range(sections.size()):
+		for j in range(i + 1, sections.size()):
+			if sections[i].intersects(sections[j]):
+				push_error("FloorManager.add_room_to_active_floor: room %s has overlapping shape sections." % spec.room_id)
+				return null
+	if not _sections_connected(sections):
+		push_error("FloorManager.add_room_to_active_floor: room %s sections do not form one connected shape." % spec.room_id)
 		return null
 	for other in floor_def.rooms:
 		if other == null:
@@ -389,31 +478,28 @@ func add_room_to_active_floor(spec: FloorRoomSpec) -> Room:
 		if other.room_id == spec.room_id:
 			push_error("FloorManager.add_room_to_active_floor: room id %s is already used by this floor." % spec.room_id)
 			return null
-		var other_size := _resolved_spec_size(other)
-		if other_size == Vector2i.ZERO:
-			continue
-		if Rect2i(other.global_origin, other_size).intersects(Rect2i(spec.global_origin, size)):
-			push_error("FloorManager.add_room_to_active_floor: room %s at %s size %s overlaps room %s." % [
-				spec.room_id, spec.global_origin, size, other.room_id])
+		if _sections_overlap(sections, _spec_sections(other)):
+			push_error("FloorManager.add_room_to_active_floor: room %s at %s overlaps room %s." % [
+				spec.room_id, bounds.position, other.room_id])
 			return null
 	# No orphan rooms: a new room must share an edge with an existing
 	# spec. An empty floor accepts its first room (it becomes entry).
 	if not floor_def.rooms.is_empty():
-		var new_bounds := Rect2i(spec.global_origin, size)
 		var touches := false
 		for other in floor_def.rooms:
 			if other == null:
 				continue
-			var other_size := _resolved_spec_size(other)
-			if other_size == Vector2i.ZERO:
-				continue
-			if _specs_share_edge(new_bounds, Rect2i(other.global_origin, other_size)):
+			if _sections_share_edge(sections, _spec_sections(other)):
 				touches = true
 				break
 		if not touches:
 			push_error("FloorManager.add_room_to_active_floor: room %s at %s does not share an edge with any room on floor '%s'." % [
-				spec.room_id, spec.global_origin, floor_def.floor_id])
+				spec.room_id, bounds.position, floor_def.floor_id])
 			return null
+	# Normalize: global_origin/size become the footprint's bounding box
+	# so every rect-based consumer (bounds, saves, layout) stays exact.
+	spec.global_origin = bounds.position
+	spec.size = bounds.size
 	var was_empty := floor_def.rooms.is_empty()
 	var room := _create_room(world, spec)
 	if room == null:
@@ -423,7 +509,7 @@ func add_room_to_active_floor(spec: FloorRoomSpec) -> Room:
 		# First room on an empty floor becomes the entry/spawn so the
 		# floor stays loadable and valid.
 		floor_def.entry_room_id = spec.room_id
-		floor_def.spawn_position = Vector2i(size.x >> 1, size.y >> 1)
+		floor_def.spawn_position = Vector2i(bounds.size.x >> 1, bounds.size.y >> 1)
 	if floor_def.auto_connect_adjacent:
 		world.auto_connect_adjacent_rooms()
 	_dirty = true
@@ -460,18 +546,19 @@ func can_delete_room(room_id: Vector2i) -> Dictionary:
 		if connection != null and (connection.source_room_id == room_id \
 				or connection.destination_room_id == room_id):
 			return refuse.call("Room has explicit floor connections.")
-	var target_bounds: Rect2i = bounds.get(room_id, Rect2i())
-	for other_id in bounds:
+	var all_sections := _floor_spec_sections()
+	var target_sections: Array[Rect2i] = all_sections.get(room_id, [])
+	for other_id in all_sections:
 		if other_id == room_id:
 			continue
-		if not _specs_share_edge(target_bounds, bounds[other_id]):
+		if not _sections_share_edge(target_sections, all_sections[other_id]):
 			continue
 		# `other_id` is a neighbor: it must keep another neighbor.
 		var keeps_neighbor := false
-		for third_id in bounds:
+		for third_id in all_sections:
 			if third_id == room_id or third_id == other_id:
 				continue
-			if _specs_share_edge(bounds[other_id], bounds[third_id]):
+			if _sections_share_edge(all_sections[other_id], all_sections[third_id]):
 				keeps_neighbor = true
 				break
 		if not keeps_neighbor:
@@ -492,16 +579,16 @@ func remove_room_from_active_floor(room_id: Vector2i) -> bool:
 	if not verdict.get("allowed", false):
 		push_error("FloorManager.remove_room_from_active_floor: %s" % verdict.get("reason", "refused"))
 		return false
-	var bounds := _floor_spec_bounds()
-	var target_bounds: Rect2i = bounds.get(room_id, Rect2i())
+	var all_sections := _floor_spec_sections()
+	var target_sections: Array[Rect2i] = all_sections.get(room_id, [])
 	# Runtime connections (auto + saved graph) touching the room go.
 	for connection in world.get_room_connections(room_id).duplicate():
 		world.unregister_connection(connection.connection_id)
 	# First remaining edge-adjacent spec becomes the fallback entry.
 	var fallback_id := Vector2i.ZERO
 	var fallback_found := false
-	for other_id in bounds:
-		if other_id != room_id and _specs_share_edge(target_bounds, bounds[other_id]):
+	for other_id in all_sections:
+		if other_id != room_id and _sections_share_edge(target_sections, all_sections[other_id]):
 			fallback_id = other_id
 			fallback_found = true
 			break
@@ -510,7 +597,7 @@ func remove_room_from_active_floor(room_id: Vector2i) -> bool:
 			floor_def.entry_room_id = fallback_id
 		else:
 			# No adjacent room (isolated spec): any remaining room works.
-			for other_id in bounds:
+			for other_id in all_sections:
 				if other_id != room_id:
 					floor_def.entry_room_id = other_id
 					fallback_found = true
@@ -546,11 +633,27 @@ func _floor_spec_bounds() -> Dictionary:
 	for spec in floor_def.rooms:
 		if spec == null:
 			continue
-		var size := _resolved_spec_size(spec)
-		if size == Vector2i.ZERO:
+		var footprint := spec.bounds()
+		if footprint.size == Vector2i.ZERO or footprint.size.x <= 0 or footprint.size.y <= 0:
 			continue
-		bounds[spec.room_id] = Rect2i(spec.global_origin, size)
+		bounds[spec.room_id] = footprint
 	return bounds
+
+## room_id -> Array[Rect2i] of global footprint sections for every
+## spec on the active floor. Cell-exact adjacency for shaped rooms.
+func _floor_spec_sections() -> Dictionary:
+	var sections := {}
+	var floor_def := active_floor
+	if floor_def == null:
+		return sections
+	for spec in floor_def.rooms:
+		if spec == null:
+			continue
+		var footprint := _spec_sections(spec)
+		if footprint.is_empty():
+			continue
+		sections[spec.room_id] = footprint
+	return sections
 
 static func _id_text(room_id: Vector2i) -> String:
 	return "(%d, %d)" % [room_id.x, room_id.y]
@@ -593,6 +696,17 @@ func _apply_layout_override(floor_def: Floor) -> void:
 		# Missing keys (older layout.json) default to visible.
 		spec.show_from_outside = bool(entry.get("show_from_outside", true))
 		spec.show_outside = bool(entry.get("show_outside", true))
+		var sections: Array[Rect2i] = []
+		for raw in entry.get("sections", []):
+			if raw is Array and (raw as Array).size() == 4:
+				sections.append(Rect2i(int(raw[0]), int(raw[1]), int(raw[2]), int(raw[3])))
+		spec.shape_sections = sections
+		# Shaped specs normalize origin/size to the footprint bbox.
+		if not sections.is_empty():
+			var footprint := spec.bounds()
+			if footprint.size != Vector2i.ZERO:
+				spec.global_origin = footprint.position
+				spec.size = footprint.size
 		specs.append(spec)
 	if specs.is_empty():
 		return
@@ -656,11 +770,29 @@ func _ensure_player_placement(world: RoomWorld, floor_def: Floor) -> void:
 	var spawn := floor_def.spawn_position
 	if spawn.x < 0 or spawn.y < 0 or spawn.x >= entry.size.x or spawn.y >= entry.size.y:
 		spawn = Vector2i(entry.size.x >> 1, entry.size.y >> 1)
+	# Shaped rooms can have holes inside their bounding box; snap the
+	# spawn to the nearest real footprint cell so the player never
+	# lands somewhere they cannot move.
+	if not entry.has_cell(spawn):
+		spawn = _nearest_room_cell(entry, spawn)
 	player.room = entry
 	player.block_layer = entry.block_layer
 	player.room_size = entry.size
 	player.place_at(spawn, player.stand_elevation_at(spawn))
 	world.set_primary_room(entry.room_coordinates)
+
+## Closest cell (by squared distance) present in the room's footprint
+## to the given local coordinate. Falls back to (0,0)-scan order.
+static func _nearest_room_cell(room: Room, target: Vector2i) -> Vector2i:
+	var best := Vector2i.ZERO
+	var best_dist := -1
+	for coordinates: Vector2i in room.cells:
+		var delta := coordinates - target
+		var dist: int = delta.x * delta.x + delta.y * delta.y
+		if best_dist < 0 or dist < best_dist:
+			best_dist = dist
+			best = coordinates
+	return best
 
 func _clear_world_rooms(world: RoomWorld) -> void:
 	for room in world.registry.get_rooms().duplicate():
@@ -671,6 +803,10 @@ func _create_room(world: RoomWorld, spec: FloorRoomSpec) -> Room:
 	var spec_size := spec.size
 	if spec_size == Vector2i.ZERO and definition != null:
 		spec_size = definition.size
+	var shaped := not spec.shape_sections.is_empty()
+	if shaped and definition != null:
+		push_warning("Floor room %s has shape sections; ignoring its RoomDefinition." % spec.room_id)
+		definition = null
 	if definition != null and spec_size == definition.size:
 		var defined_room := world.create_room_from_definition(spec.room_id, spec.global_origin, definition)
 		if defined_room != null:
@@ -683,7 +819,21 @@ func _create_room(world: RoomWorld, spec: FloorRoomSpec) -> Room:
 		return defined_room
 	if definition != null and spec_size != Vector2i.ZERO:
 		push_warning("Floor room %s overrides definition size %s with spec size %s." % [spec.room_id, definition.size, spec_size])
-	var room := world.create_room_at(spec.room_id, spec.global_origin, spec_size, spec.floor_colors)
+	# Spec sections are global; the room's local sections are relative
+	# to the footprint's bounding-box origin. Derive it from the
+	# sections themselves so authored specs don't need normalized
+	# global_origin/size to materialize correctly.
+	var origin := spec.global_origin
+	if shaped:
+		var footprint := _sections_bounds(spec.shape_sections)
+		if footprint.size != Vector2i.ZERO:
+			origin = footprint.position
+			spec_size = footprint.size
+	var local_sections: Array[Rect2i] = []
+	if shaped:
+		for section in spec.shape_sections:
+			local_sections.append(Rect2i(section.position - origin, section.size))
+	var room := world.create_room_at(spec.room_id, origin, spec_size, spec.floor_colors, local_sections)
 	if room != null:
 		room.show_from_outside = spec.show_from_outside
 		room.show_outside = spec.show_outside

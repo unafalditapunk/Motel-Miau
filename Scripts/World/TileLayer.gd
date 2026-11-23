@@ -23,7 +23,10 @@ func _on_cells_changed() -> void:
 
 func _resync_tiles() -> void:
 	_resync_queued = false
-	if room == null or grid == null:
+	# Rooms pending deletion (floor switches) still receive deferred
+	# resyncs; their cells would sort against the NEW floor's depth
+	# center and overflow the z_index range.
+	if room == null or not is_instance_valid(room) or room.is_queued_for_deletion() or grid == null:
 		return
 	var wanted := {}
 	for coordinates in room.cells:

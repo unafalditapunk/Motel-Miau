@@ -46,20 +46,30 @@ func spatial_distance(room_coordinates: Vector2i) -> int:
 	_ensure_cache()
 	return int(_spatial_distances.get(room_coordinates, -1))
 
-## Room ids whose global bounds intersect room_id's bounds grown by
-## neighborhood_padding — i.e. rooms physically touching or overlapping
-## the given room, regardless of room ids or dimensions.
+## Room ids whose footprints intersect room_id's footprint grown by
+## neighborhood_padding — i.e. rooms physically touching or
+## overlapping the given room, regardless of room ids or dimensions.
+## Section rects keep shaped (non-rectangular) rooms exact.
 func spatial_neighbors(room_id: Vector2i) -> Array[Vector2i]:
 	var room := _room_world.get_room(room_id)
 	if room == null:
 		return []
-	var grown := room.global_bounds().grow(_room_world.neighborhood_padding)
+	var grown: Array[Rect2i] = []
+	for section in room.global_sections():
+		grown.append(section.grow(_room_world.neighborhood_padding))
 	var result: Array[Vector2i] = []
 	for other in _room_world.registry.get_rooms():
 		if other == null or other == room:
 			continue
-		if grown.intersects(other.global_bounds()):
-			result.append(other.room_coordinates)
+		for other_section in other.global_sections():
+			var touches := false
+			for grown_section in grown:
+				if grown_section.intersects(other_section):
+					touches = true
+					break
+			if touches:
+				result.append(other.room_coordinates)
+				break
 	return result
 
 func _ensure_cache() -> void:

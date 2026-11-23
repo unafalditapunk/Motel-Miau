@@ -547,6 +547,88 @@ func _test_room_visibility_flags() -> void:
 		_expect(not restored.show_from_outside and not restored.show_outside,
 			"visibility flags not persisted (from=%s out=%s)" % [restored.show_from_outside, restored.show_outside])
 
+func _test_shaped_rooms() -> void:
+	# pf_d holds one 12x12 room (id (4,4)) at global origin (-10,-10),
+	# covering x/y in [-10, 2). Build an L-shaped room attached to its
+	# south edge: section A x[-10,-2) y[2,6), section B x[-2,2) y[2,10).
+	_expect(_floor_manager.switch_floor(&"pf_d"), "switch to pf_d failed")
+	var l_spec := FloorRoomSpec.new()
+	l_spec.room_id = Vector2i(5, 5)
+	l_spec.shape_sections = [
+		Rect2i(Vector2i(-10, 2), Vector2i(8, 4)),
+		Rect2i(Vector2i(-2, 2), Vector2i(4, 8)),
+	]
+	# No size/origin needed: they resolve from the sections.
+	_expect(_floor_manager.add_room_to_active_floor(l_spec) != null, "shaped room creation failed")
+	var shaped := _room_world.get_room(Vector2i(5, 5))
+	_expect(shaped != null, "shaped room not registered")
+	if shaped == null:
+		return
+	_expect(shaped.size == Vector2i(12, 8), "shaped room size %s != bbox 12x8" % shaped.size)
+	_expect(shaped.cell_origin == Vector2i(-10, 2), "shaped room origin %s wrong" % shaped.cell_origin)
+	_expect(shaped.cells.size() == 64, "shaped room cell count %d != 64" % shaped.cells.size())
+	_expect(shaped.has_cell(Vector2i(0, 0)), "shaped room missing footprint cell (0,0)")
+	_expect(shaped.has_cell(Vector2i(8, 5)), "shaped room missing footprint cell (8,5)")
+	# Local (4,5) = global (-6,7) sits in the L's bounding-box hole.
+	_expect(not shaped.has_cell(Vector2i(4, 5)), "shaped room claims a hole cell")
+	_expect(_room_world.get_room_at_world_cell(Vector2i(-6, 7)) == null,
+		"hole cell wrongly resolves to a room")
+	# Invalid shapes are refused: disconnected sections and sections
+	# overlapping each other.
+	var disconnected := FloorRoomSpec.new()
+	disconnected.room_id = Vector2i(6, 6)
+	disconnected.shape_sections = [
+		Rect2i(Vector2i(-10, 12), Vector2i(4, 4)),
+		Rect2i(Vector2i(0, 20), Vector2i(4, 4)),
+	]
+	_expect(_floor_manager.add_room_to_active_floor(disconnected) == null, "disconnected sections accepted")
+	var self_overlap := FloorRoomSpec.new()
+	self_overlap.room_id = Vector2i(7, 7)
+	self_overlap.shape_sections = [
+		Rect2i(Vector2i(-10, 12), Vector2i(6, 4)),
+		Rect2i(Vector2i(-8, 14), Vector2i(6, 4)),
+	]
+	_expect(_floor_manager.add_room_to_active_floor(self_overlap) == null, "self-overlapping sections accepted")
+	# A room may fill the L's hole: its cells do not intersect the
+	# footprint even though its bounds sit inside the bbox.
+	var hole_fill := FloorRoomSpec.new()
+	hole_fill.room_id = Vector2i(8, 8)
+	hole_fill.shape_sections = [Rect2i(Vector2i(-10, 6), Vector2i(4, 4))]
+	_expect(_floor_manager.add_room_to_active_floor(hole_fill) != null, "hole-fill room rejected")
+	# Save + reload: sections, sparse cells, and hole behavior persist.
+	_expect(_floor_manager.save_active_floor(), "pf_d shaped save failed")
+	_expect(_floor_manager.switch_floor(&"pf_b"), "switch away from shaped pf_d failed")
+	_expect(_floor_manager.switch_floor(&"pf_d"), "return to shaped pf_d failed")
+	var reloaded := _room_world.get_room(Vector2i(5, 5))
+	_expect(reloaded != null, "shaped room not restored")
+	if reloaded != null:
+		_expect(reloaded.shape_sections.size() == 2, "shaped room sections lost: %d" % reloaded.shape_sections.size())
+		_expect(reloaded.cells.size() == 64, "reloaded shaped cell count %d != 64" % reloaded.cells.size())
+		_expect(not reloaded.has_cell(Vector2i(4, 5)), "reloaded shaped room claims a hole")
+	_expect(_room_world.get_room_at_world_cell(Vector2i(-6, 7)) == null,
+		"hole cell resolves to a room after reload")
+	var spec := _floor_manager.active_floor.find_room_spec(Vector2i(5, 5))
+	_expect(spec != null and spec.shape_sections.size() == 2, "layout spec lost sections")
+
+	# Collision: bbox holes are not standable — stepping into one is
+	# blocked like stepping outside the room, while stepping into a
+	# room that fills the hole transitions normally.
+	var shaped_room := _room_world.get_room(Vector2i(5, 5))
+	_expect(shaped_room != null, "shaped room missing for collision check")
+	if shaped_room != null:
+		_player.room = shaped_room
+		_player.block_layer = shaped_room.block_layer
+		_player.room_size = shaped_room.size
+		_player.place_at(Vector2i(8, 5), 0.0)
+		_expect(not _player.can_move_to(Vector2i(7, 5)), "player can move into shaped-room hole")
+		_expect(not _player.move_to(Vector2i(7, 5)), "player moved into shaped-room hole")
+		# Local (1,3) is section A; stepping south enters global (-9,6),
+		# which is the hole-fill room's footprint.
+		_player.place_at(Vector2i(1, 3), 0.0)
+		var transition := _player.evaluate_transition(Vector2i(0, 1))
+		_expect(bool(transition.get("valid", false)),
+			"transition into hole-fill room refused: %s" % transition.get("reason", ""))
+
 func _run_checks() -> void:
 	_test_shipped_switch_chain()
 	_test_content_and_player_persistence()
@@ -560,6 +642,7 @@ func _run_checks() -> void:
 	_test_room_deletion()
 	_test_invalid_layout_rejected()
 	_test_room_visibility_flags()
+	_test_shaped_rooms()
 
 func _report() -> void:
 	if _failures.is_empty():

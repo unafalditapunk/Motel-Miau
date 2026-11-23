@@ -32,6 +32,12 @@ var block_layer: BlockLayer
 ## block layers of edge-adjacent rooms while this room is primary.
 var show_from_outside := true
 var show_outside := true
+## Local-space rects (position + size in room cell coords) whose union
+## forms this room's footprint. Empty means the full size.x by size.y
+## rectangle. `cells` only ever contains footprint cells, so every
+## per-cell system (movement, building, saves, rendering) is
+## shape-aware automatically.
+var shape_sections: Array[Rect2i] = []
 var deemphasis_material: Material = null
 var is_sliding := false
 var _deemphasis_nodes: Array[CanvasItem] = []
@@ -53,12 +59,38 @@ func rebuild() -> void:
 
 func build_cells() -> void:
 	cells.clear()
-	for x in range(size.x):
-		for y in range(size.y):
-			var coordinates := Vector2i(x, y)
-			var cell := RoomCell.new(coordinates, default_walkable)
-			cell.tile = default_tile
-			cells[coordinates] = cell
+	if shape_sections.is_empty():
+		for x in range(size.x):
+			for y in range(size.y):
+				var coordinates := Vector2i(x, y)
+				var cell := RoomCell.new(coordinates, default_walkable)
+				cell.tile = default_tile
+				cells[coordinates] = cell
+		return
+	for section in shape_sections:
+		for x in range(section.position.x, section.end.x):
+			for y in range(section.position.y, section.end.y):
+				var coordinates := Vector2i(x, y)
+				if cells.has(coordinates):
+					continue
+				var cell := RoomCell.new(coordinates, default_walkable)
+				cell.tile = default_tile
+				cells[coordinates] = cell
+
+## Replaces the room's footprint with local-space rect sections and
+## rebuilds the cell grid. Pass an empty array for a full rectangle.
+func set_shape_sections(sections: Array[Rect2i]) -> void:
+	shape_sections = sections.duplicate()
+	rebuild()
+
+## Footprint rects in global world-cell coordinates.
+func global_sections() -> Array[Rect2i]:
+	if shape_sections.is_empty():
+		return [global_bounds()]
+	var result: Array[Rect2i] = []
+	for section in shape_sections:
+		result.append(Rect2i(section.position + cell_origin, section.size))
+	return result
 
 func set_size(new_size: Vector2i) -> void:
 	size = new_size
@@ -70,6 +102,22 @@ func set_grid(new_grid: IsometricGrid) -> void:
 
 func has_cell(coordinates: Vector2i) -> bool:
 	return cells.has(coordinates)
+
+## Footprint membership that does not require built cells: true when the
+## local coordinate lies inside a shape section (or the full rect for
+## rectangular rooms). Safe before _ready/build_cells runs — used by
+## spatial queries that may run during registration.
+func has_footprint_cell(local_coordinates: Vector2i) -> bool:
+	if shape_sections.is_empty():
+		return local_coordinates.x >= 0 and local_coordinates.y >= 0 \
+			and local_coordinates.x < size.x and local_coordinates.y < size.y
+	for section in shape_sections:
+		if local_coordinates.x >= section.position.x \
+				and local_coordinates.x < section.end.x \
+				and local_coordinates.y >= section.position.y \
+				and local_coordinates.y < section.end.y:
+			return true
+	return false
 
 func get_cell(coordinates: Vector2i) -> RoomCell:
 	var cell = cells.get(coordinates)

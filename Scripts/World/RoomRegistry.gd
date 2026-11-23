@@ -80,21 +80,28 @@ func global_bounds(room: Room) -> Rect2i:
 		return Rect2i()
 	return Rect2i(room.cell_origin, room.size)
 
-## Returns the registered room whose global cell bounds contain the given
-## world-grid cell, or null when no room covers it.
+## Returns the registered room whose footprint contains the given
+## world-grid cell, or null when no room covers it. Shape-aware: only
+## real footprint cells match, not a room's bounding box.
 func get_room_at_global_cell(global_cell: Vector2i) -> Room:
 	for room in get_rooms():
-		var local := global_cell - room.cell_origin
-		if local.x >= 0 and local.y >= 0 and local.x < room.size.x and local.y < room.size.y:
+		if room.has_footprint_cell(global_cell - room.cell_origin):
 			return room
 	return null
 
-## True when the two rooms' global cell bounds overlap by at least one
-## cell. Rooms that merely share an edge do not overlap.
+## True when the two rooms' footprints share at least one cell. Rooms
+## that merely touch along an edge or corner do not overlap. Section
+## pairs are tested as rects, which is exact for cell unions.
 func rooms_overlap(first: Room, second: Room) -> bool:
 	if first == null or second == null or first == second:
 		return false
-	return global_bounds(first).intersects(global_bounds(second))
+	if not global_bounds(first).intersects(global_bounds(second)):
+		return false
+	for section in first.global_sections():
+		for other in second.global_sections():
+			if section.intersects(other):
+				return true
+	return false
 
 ## Returns the first registered room whose bounds overlap the given
 ## room's bounds, or null when the layout is clear.

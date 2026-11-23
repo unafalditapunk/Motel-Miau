@@ -167,18 +167,31 @@ write to the real `user://saves`.
   `cursor_cell_for_world_position()` (injectable for headless tests).
   DebugHud adds a `Mode: CREATION` line with view + cursor cell.
   Creation Mode (Phase 2): the Create Room tool (C toggles, GRID view
-  only) drags an LMB rectangle on the global grid — anchor + live cursor
-  cell give an inclusive-cell Rect2i in any drag direction. Releasing
-  keeps the selection; X opens a PixelUi confirmation panel (auto
-  "x,y" room id, read-only, size/origin info, Create/Cancel). Preview
-  colors: green valid / orange overlap / yellow isolated / red invalid
-  (2..1024 cells per axis, `Floor.MIN_ROOM_DIMENSION`). New rooms must
-  share an edge with an existing room (`_edges_touch` — corner contact
-  doesn't count); an empty floor accepts its first room. The panel has
+  only) drags LMB rectangles on the global grid — each drag adds one
+  section to the pending shape (`_pending_sections`); releasing keeps
+  it, Backspace undoes the last section, and X opens a PixelUi
+  confirmation panel (auto "x,y" room id, read-only, section/cell/bounds
+  info, Create/Cancel). Sections must be sized (2..1024 cells per axis,
+  `Floor.MIN_ROOM_DIMENSION`), non-overlapping, edge-connected to the
+  pending union, cell-clear of existing rooms, and the finished shape
+  must share an edge with an existing room (`_edges_touch` — corner
+  contact doesn't count); an empty floor accepts its first room.
+  Preview colors: green valid / orange overlap / yellow isolated or
+  disconnected / red invalid. Rooms may be non-rectangular: a spec's
+  `shape_sections` (global rects, `FloorRoomSpec`) become the Room's
+  LOCAL `shape_sections` relative to the footprint bounding box, and
+  `Room.cells` only contains footprint cells — every per-cell system
+  (movement, building, saves, queries) is cell-exact automatically.
+  `global_origin`/`size` normalize to the union bbox; bbox "holes" are
+  not room cells and may be filled by other rooms. Sections persist in
+  layout.json (`"sections"` per entry); room saves stay compatible via
+  the bbox size/origin. The panel has
   two visibility checkboxes (both default on): `show_from_outside=false`
   hides the room until the player enters it, `show_outside=false` fades
-  out edge-adjacent rooms' BlockLayers while it is primary — RoomVisuals
-  animates both (slide for rooms, alpha fade for blocks). Flags live on
+  out adjacent rooms' whole Room.modulate (floors, tiles, carpets,
+  blocks, markers — edge AND corner contact) while it is primary —
+  RoomVisuals animates both (slide for rooms, alpha fade for rooms).
+  Flags live on
   FloorRoomSpec/Room and persist in layout.json. Esc/RMB/V/B
   cancel drags and panels safely. Confirming calls
   `FloorManager.add_room_to_active_floor(spec)`, which re-validates
@@ -197,6 +210,9 @@ write to the real `user://saves`.
   `remove_room_from_active_floor` unregisters runtime connections,
   rewrites `connections.json` immediately, reassigns entry/spawn when
   the entry room is deleted, drops the spec, and persists layout.json.
+  The panel's Delete is two-step: the first press only arms it (button
+  becomes "Confirm", status prompts), the second press deletes; the arm
+  resets whenever the panel closes or another room is inspected.
 - Floor layout persistence: `FloorSaveSystem.save_layout/load_layout`
   store room SPECS (id/origin/size/definition path/colors) plus
   `entry_room_id`/`spawn_position` as `user://floors/<id>/layout.json`

@@ -48,12 +48,12 @@ func register(connection: RoomConnection) -> bool:
 		push_error("RoomConnection '%s' needs at least one cell on each side." % connection.connection_id)
 		return false
 	for cell in connection.source_cells:
-		if not _in_bounds(cell, source.size):
-			push_error("RoomConnection '%s' source cell %s is outside room %s bounds %s." % [connection.connection_id, cell, connection.source_room_id, source.size])
+		if not source.has_footprint_cell(cell):
+			push_error("RoomConnection '%s' source cell %s is outside room %s footprint." % [connection.connection_id, cell, connection.source_room_id])
 			return false
 	for cell in connection.destination_cells:
-		if not _in_bounds(cell, destination.size):
-			push_error("RoomConnection '%s' destination cell %s is outside room %s bounds %s." % [connection.connection_id, cell, connection.destination_room_id, destination.size])
+		if not destination.has_footprint_cell(cell):
+			push_error("RoomConnection '%s' destination cell %s is outside room %s footprint." % [connection.connection_id, cell, connection.destination_room_id])
 			return false
 	if _is_duplicate(connection):
 		push_warning("RoomConnection '%s' duplicates an existing connection (same rooms, type and cells)." % connection.connection_id)
@@ -169,7 +169,7 @@ func find_exit(room: Room, local_cell: Vector2i, direction := Vector2i.ZERO) -> 
 		var directed: Array[Dictionary] = []
 		for match in matches:
 			var dest_room := _room(match["room_id"])
-			if dest_room != null and dest_room.global_bounds().has_point(neighbor_world):
+			if dest_room != null and dest_room.has_footprint_cell(neighbor_world - dest_room.cell_origin):
 				directed.append(match)
 		if directed.is_empty():
 			push_warning("RoomConnectionManager: %d connection(s) cover exit cell %s in room %s but none leads toward %s; transition refused." % [
@@ -237,26 +237,29 @@ func validate() -> Array[String]:
 			problems.append("connection '%s' references missing destination room %s" % [id, connection.destination_room_id])
 			continue
 		for cell in connection.source_cells:
-			if not _in_bounds(cell, source.size):
+			if not source.has_footprint_cell(cell):
 				problems.append("connection '%s' source cell %s outside room %s" % [id, cell, connection.source_room_id])
 		for cell in connection.destination_cells:
-			if not _in_bounds(cell, destination.size):
+			if not destination.has_footprint_cell(cell):
 				problems.append("connection '%s' destination cell %s outside room %s" % [id, cell, connection.destination_room_id])
 		if not connection.interactive:
 			for cell in connection.source_cells:
-				if not _on_boundary(cell, source.size):
+				if not _on_boundary(source, cell):
 					problems.append("connection '%s' spatial source cell %s is not on room %s boundary" % [id, cell, connection.source_room_id])
 			if connection.bidirectional:
 				for cell in connection.destination_cells:
-					if not _on_boundary(cell, destination.size):
+					if not _on_boundary(destination, cell):
 						problems.append("connection '%s' bidirectional spatial entry %s is not on room %s boundary" % [id, cell, connection.destination_room_id])
 	return problems
 
-func _in_bounds(cell: Vector2i, room_size: Vector2i) -> bool:
-	return cell.x >= 0 and cell.y >= 0 and cell.x < room_size.x and cell.y < room_size.y
-
-func _on_boundary(cell: Vector2i, room_size: Vector2i) -> bool:
-	return cell.x == 0 or cell.y == 0 or cell.x == room_size.x - 1 or cell.y == room_size.y - 1
+## Footprint boundary: any cardinal neighbor that is not a room cell —
+## correct for concave shaped rooms where a bbox-interior cell can
+## still sit on the footprint edge.
+func _on_boundary(room: Room, cell: Vector2i) -> bool:
+	for direction in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+		if not room.has_footprint_cell(cell + direction):
+			return true
+	return false
 
 func serialize_all() -> Array:
 	var data: Array = []
