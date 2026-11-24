@@ -24,7 +24,12 @@ PlayerCollisionSmokeTest, CameraSmokeTest, PlayerDirectionSmokeTest,
 RoomWorldSmokeTest, RoomTransitionSmokeTest, MainRoomWorldSmokeTest,
 RoomLayoutSmokeTest, RoomConnectionSmokeTest, RoomNeighborhoodSmokeTest,
 SaveIntegritySmokeTest, TileSmokeTest, CarpetSmokeTest,
-BuildingCatalogSmokeTest, BuildingUiSmokeTest. Each prints
+BuildingCatalogSmokeTest, BuildingUiSmokeTest, FloorSmokeTest,
+FloorPersistenceSmokeTest, FloorPanelSmokeTest,
+FloorManagementSmokeTest, CreationModeSmokeTest,
+WorldSnapshotSmokeTest, BuildOpsSmokeTest,
+StructuralGuardSmokeTest, FloorTransitionSmokeTest,
+StructuralOpsSmokeTest, FloorOpsSmokeTest. Each prints
 `<NAME>_SMOKE: OK`. Tests that touch the filesystem redirect
 `RoomSaveSystem.save_dir` to `user://smoke_saves/<test>` so they never
 write to the real `user://saves`.
@@ -83,10 +88,16 @@ write to the real `user://saves`.
   unreadable files and `RoomWorld.quarantine_incompatible_saves()` moves
   the bad ones to `user://saves/_quarantine/` (explicit call only).
 - Connection exit lookup is deterministic: a single covering connection
-  always wins (explicit links may target non-adjacent rooms); when
-  several connections cover one exit cell, direction disambiguates by
-  destination bounds, ties break by connection id with a warning, and a
-  direction no destination satisfies refuses the transition.
+  always wins for AUTHORED connections (explicit links may target
+  non-adjacent rooms); auto-generated `auto_*` doors are geometric and
+  only fire when the step actually enters the destination room's
+  footprint — stepping into a shaped room's notch/void bumps instead of
+  teleporting. When several connections cover one exit cell, direction
+  disambiguates by destination bounds, ties break by connection id with
+  a warning, and a direction no destination satisfies refuses the
+  transition. The landing cell is the one actually stepped into when it
+  is a declared entry (concave corners can border several cells of the
+  same room).
 - Connection markers: optional ground sprites at connection cells, drawn
   by `RoomVisuals` under each room's `ConnectionMarkers` node. Per
   connection `marker_texture` overrides the RoomWorld per-type exports
@@ -246,6 +257,128 @@ write to the real `user://saves`.
   references remain, then `unregister_floor` +
   `FloorSaveSystem.delete_floor_save` (recursive dir removal) drops
   all its data.
+- Structural mutation guard (Phase C1): `MultiplayerManager.is_client
+  (tree)` is the single role check (group "multiplayer_manager",
+  mode==CLIENT — single-player has no node, server reports SERVER).
+  `FloorManager.structural_edits_readonly()` delegates to it and every
+  public structural mutator refuses while true: register/unregister_
+  floor, create/delete_floor, switch/load/activate_floor,
+  add/remove_room_to_active_floor. Internal replica paths are
+  deliberately unguarded — `load_floor_without_save` (client boot),
+  `materialize_floor`, `apply_layout_data`, `WorldSnapshot.apply`.
+  FloorPanel renders read-only on clients for STRUCTURAL edits (list/
+  ACTIVE badge intact; New Floor and Del disabled + handler guards)
+  but Enter stays enabled — it sends a travel REQUEST (Phase C2);
+  FloorEditor keeps inspection but refuses the create-room
+  tool, room delete, visibility checkboxes, and panel-create, with a
+  HUD read-only line. StructuralGuardSmokeTest covers all of it with
+  a bare mode=CLIENT manager node.
+- Per-player floor transitions (Phase C2): players may stand on
+  different floors simultaneously. The server keeps one RoomWorld per
+  OCCUPIED floor — the bound `room_world` serves the FloorManager's
+  active (boot) floor; `FloorManager.runtime_worlds` maps other floor
+  ids to `WorldBootstrap.create_floor_world(id)` instances (fully
+  configured clones: catalogs, grid, scenes). `materialize_runtime_
+  floor(id, world)` materializes + hydrates via `load_room_states`/
+  `save_room_states` (room contents + connections only — NO
+  player_state.json, since bodies are not world state). Peer→floor
+  lives in `MultiplayerManager._peer_floor`; `_world_for_peer`/
+  `_world_for_floor` resolve the right RoomWorld for build ops and
+  `_player_world_cells` (occupancy is per-world). Room ids are only
+  unique per floor, so spawn/state/build-result payloads all carry
+  `floor_id` and clients filter against `_my_floor_id`.
+  CRITICAL: `Player.room_world` must be set at every bind site
+  (spawn, body/avatar spawn, floor transition both directions,
+  `_ensure_player_placement`, `_apply_saved_player_state`,
+  `_reconcile_local`) — `Player._room_world()` falls back to the
+  "room_worlds" group only when unset, which is ambiguous once the
+  server hosts several floor worlds (bodies on forest/village were
+  resolving transitions against the motel world → reconcile jumps).
+  Transition flow: client `request_floor_transition(floor_id)` (F7
+  Enter or `--travel=<id>`) -> `_rpc_floor_transition_request` ->
+  server `_handle_floor_transition` validates (body exists =
+  world-synced, floor registered, not already there), materializes
+  the destination world on first visit, saves the outgoing world's
+  room states, reparents the body into `dest_world.entity_layer` at
+  the floor's entry/spawn (footprint-snapped), then sends THAT peer a
+  private snapshot (`WorldSnapshot.build(fm, dest_world, floor_def)`
+  with snapshot purpose "travel" — applies + `_apply_transition_spawn`,
+  no world_ready) plus rpc_id `_rpc_spawn_player` for occupants of the
+  new floor and `_rpc_despawn_player` for the leaver. Rejections go
+  through `_rpc_floor_transition_rejected` and unlock input;
+  `transition_result` signal reports the outcome. Snapshots now carry
+  `floor_def` (floor_def.json format) so clients register floors the
+  server created at runtime via `FloorManager.register_floor_replica`
+  (unguarded — replica state, not a local edit). `_transition_pending`
+  locks input/build requests until the destination snapshot lands.
+  Known limits: runtime worlds are never
+  freed on travel (reused per floor), server has no permissions model — any
+  registered floor is travelable. FloorTransitionSmokeTest covers
+  rejections, per-peer isolation, runtime-world materialization, and
+  the replica apply path.
+- Authoritative room structural ops (Phase C3): clients create/delete
+  rooms and toggle `show_from_outside`/`show_outside` through
+  `MultiplayerManager.request_struct_create/delete/visibility` ->
+  `_rpc_struct_op` -> `_handle_struct_op`. Requests carry op kind,
+  floor_id, room spec (FloorSaveSystem.spec_to_layout_entry shape) or
+  room_id, both visibility flags, and share the build-op id dedup
+  (`_build_op_max`/`_claim_build_op` — one monotonic serial per client
+  for ALL op kinds). The server derives the peer's floor from
+  `_peer_floor` and rejects `wrong_floor`/`not_ready`/`duplicate`/
+  `unknown_op`; validation reuses the FloorManager cores which were
+  refactored floor-scoped: `_add_room_to_floor`/`_remove_room_from_
+  floor`/`_can_delete_room`/`_set_room_visibility` take
+  (floor_def, world[, occupied, persist]) — public wrappers
+  (`add_room_to_floor`, `remove_room_from_floor`,
+  `can_delete_room_on_floor`, `set_room_visibility_on_floor`) resolve
+  via `world_for_floor` and persist (layout.json + connections.json on
+  delete); `persist=false` + the `replica_*` ops are the client path.
+  Delete occupancy is multiplayer-aware: `_occupied_room_ids(world)`
+  maps every authoritative body (all `_bodies` on that floor's world
+  plus the server's own avatar) to its room_id — the local "player"
+  group alone is insufficient. Accepted ops broadcast
+  `_rpc_struct_result.rpc` to everyone with floor_id + requester;
+  clients drop other floors' ops, QUEUE ops arriving before the
+  snapshot finishes (`_pending_struct_ops`, flushed by
+  `_flush_pending_struct_ops` on join/travel/rejected-transition —
+  reliable ordering puts the snapshot ahead, and `_apply_struct_
+  payload` is idempotent so snapshot-carried changes count as
+  consistent). `struct_result` signal feeds FloorEditor, which sends
+  requests instead of mutating on clients (`_struct_manager`,
+  `_struct_pending` HUD count, `_on_struct_result` refreshes panels;
+  `payload.requester` distinguishes own ops from observers').
+  `--struct-op=create:rx,ry:ox,oy:w,h|delete:rx,ry|vis:rx,ry:a,b`
+  fires requests headless after sync. StructuralOpsSmokeTest covers
+  the C3 matrix.
+- Authoritative floor ops (Phase C4): floor create/delete are
+  catalog-global (not floor-scoped), so they use their own RPC pair
+  `request_floor_create/delete` -> `_rpc_floor_op` ->
+  `_handle_floor_op`, sharing the `_build_op_max` dedup serial.
+  Requests carry only `floor_id`/`display_name`; the server derives
+  the canonical definition itself via `FloorManager.create_floor`
+  (validates id via `FloorSaveSystem.floor_dir`, rejects duplicates,
+  persists `floor_def.json`) and broadcasts
+  `_rpc_floor_result.rpc` to ALL clients with the
+  `floor_definition_data` payload — clients register via
+  `register_floor_replica`/`_floor_from_saved_data` (no disk). Delete
+  reuses `can_delete_floor` (protected/last-floor rules) plus a
+  multiplayer occupancy sweep over `_floor_id_for_peer` for every
+  body — occupied floors reject with `occupied`, no evacuation.
+  Active-floor delete first `switch_floor`s to a fallback, then
+  `_migrate_runtime_bodies_to_bound` rebinds any bodies parked in the
+  fallback's runtime_worlds entry into the bound world before
+  `release_runtime_world` + `unregister_floor` +
+  `delete_floor_save`. Ordering/sync: every WorldSnapshot now carries
+  a `"floors"` catalog (all `floor_definition_data` entries) and
+  `apply` reconciles replicas — self-healing for joins and missed
+  broadcasts; reliable ordered RPCs keep broadcasts behind the
+  snapshot that contains them. Client-side
+  `unregister_floor_replica` refuses the ACTIVE floor (divergence
+  surface, resolved by next snapshot). FloorPanel create/delete
+  buttons stay enabled on clients and send requests; `floor_result`
+  signal refreshes the list/status. `--floor-op=create:id[:name]` /
+  `delete:id` (repeatable) and repeatable `--travel=` fire headless
+  after sync. FloorOpsSmokeTest covers the C4 matrix.
 - Neighborhood: the visible set is the primary room plus rooms within
   `spatial_neighborhood_depth` BFS hops of bounds adjacency (a room's
   `global_bounds()` grown by `neighborhood_padding` world cells must
@@ -274,11 +407,17 @@ write to the real `user://saves`.
   disconnect.
 - World snapshot sync (Phase A): `WorldSnapshot` (`Scripts/Net/`,
   RefCounted) is the authoritative world transfer — `build()` on the
-  server serializes `{version, floor_id, layout, connections,
+  server serializes `{version, floor_id, floor_def, layout, connections,
   room_states}` reusing `FloorSaveSystem.layout_data`,
+  `FloorSaveSystem.floor_definition_data`,
   `RoomConnectionManager.serialize_all`, and
   `RoomSaveSystem.collect_room_state` per room (player position is
   deliberately excluded — avatars come from the spawn handshake).
+  `floor_def` (floor_def.json format) lets a client register floors
+  unknown to it via `FloorManager.register_floor_replica`;
+  `build`'s optional third arg overrides `active_floor` for
+  non-active runtime worlds, and `apply` honors a `"spawn"` dict for
+  floor transitions.
   `apply()` on the client runs `FloorManager.apply_layout_data`
   (in-memory spec override sharing `_apply_layout_entries` with the
   layout.json path — never writes disk), `validate_floor`,
@@ -334,16 +473,23 @@ write to the real `user://saves`.
   `_rpc_build_result(false, reason)`, applies once, then broadcasts
   `_rpc_build_result(true, payload)` to all clients — clients
   reproduce via `BuildOps.apply_*_any` with no re-request (a failed
-  local apply pushes a divergence warning). Request fields are
+  local apply pushes a divergence warning). All build traffic is
+  floor-scoped: requests validate against the SENDER's floor world
+  (`_world_for_peer`), results carry `floor_id`, and clients drop ops
+  for floors they are not visiting (room ids collide across floors).
+  `can_request_build()` also requires no pending floor transition. Request fields are
   coerced via `BuildOps.req_int/req_float/req_bool` — raw
   int()/float()/bool() on Variant RPC data can abort a handler.
   `build_result` signal is the UI feedback hook. Debug args:
   `--build-op=place:x,y:category:id[:rot[:flip]]` (repeatable) and
   `--build-op=remove:x,y` (auto-detects topmost) fire 2 s + 1.5 s·i
   after sync; legacy `--build-place/--build-remove` still parse;
-  `--dump-world=N` delays the WORLD_DUMP by N seconds and now lists
-  explicit tile overrides and carpet anchors per room. Known limits:
-  no floor-switch/room create-delete sync (Phase C), server
+  `--dump-world=N` delays the WORLD_DUMP by N seconds (server dumps
+  every materialized floor world plus a `peer_floors` map; it now
+  lists explicit tile overrides and carpet anchors per room) and
+  `--travel=<floor_id>` (repeatable, in order) requests client floor
+  transitions once synced. Known limits:
+  server
   persistence/autosave deferred (Phase D) — the dedicated server
   still skips save-on-exit; movement has no interpolation; no
   auth/encryption.

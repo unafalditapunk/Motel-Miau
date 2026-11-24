@@ -38,6 +38,10 @@ TESTS=(
     BuildingUiSmokeTest
     WorldSnapshotSmokeTest
     BuildOpsSmokeTest
+    StructuralGuardSmokeTest
+    FloorTransitionSmokeTest
+    StructuralOpsSmokeTest
+    FloorOpsSmokeTest
 )
 
 if [ -n "$FILTER" ]; then

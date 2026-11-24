@@ -115,6 +115,7 @@ func _run_checks() -> void:
 	_test_connection_save_load()
 	_test_exit_direction()
 	_test_connection_markers()
+	_test_shaped_room_exits()
 
 func _test_registration() -> void:
 	var good := _make_connection(&"door_a_b", Vector2i(0, 0), Vector2i(1, 0), [Vector2i(15, 7), Vector2i(15, 8)], [Vector2i(0, 7), Vector2i(0, 8)])
@@ -323,6 +324,58 @@ func _test_connection_markers() -> void:
 	_room_world.connections.deserialize_all(serialized)
 	var restored := _room_world.get_connection(&"portal_a_d")
 	_expect(restored != null and restored.marker_texture == tex, "marker texture lost in serialization round-trip")
+
+func _test_shaped_room_exits() -> void:
+	# L-shaped room A whose notch is filled/wrapped by room B. The
+	# inner corner gives exit cells two outward directions — one into
+	# B, one into void — and cell (3,3) borders TWO cells of B. Auto
+	# doors are geometric, so the step target must decide both whether
+	# the connection fires and which cell the player lands on.
+	# Origins stay inside the test layout's bounds so depth sorting
+	# stays within the normalized z-index range.
+	var room_l := _room_world.create_room_at(Vector2i(10, 10), Vector2i(56, 0), Vector2i(4, 8), [],
+		[Rect2i(0, 0, 4, 4), Rect2i(0, 4, 2, 4)])
+	var room_b := _room_world.create_room_at(Vector2i(11, 10), Vector2i(58, 3), Vector2i(3, 5), [],
+		[Rect2i(0, 1, 2, 4), Rect2i(2, 0, 1, 5)])
+	_expect(room_l != null, "L-shaped room creation failed")
+	_expect(room_b != null, "notch room creation failed")
+	if room_l == null or room_b == null:
+		return
+	_expect(_room_world._connect_adjacent_pair(room_l, room_b, RoomConnection.ConnectionType.DOOR) == 1,
+		"auto-connect did not link the shaped rooms")
+
+	# Corner cell (3,3) borders B on two sides: south enters B at
+	# world (103,104) = B local (1,1); east enters at (104,103) = (2,0).
+	# The recorded pair only keeps the first adjacency, so the stepped
+	# cell must win over the index-paired entry.
+	var south := _room_world.find_room_exit(room_l, Vector2i(3, 3), Vector2i(0, 1))
+	_expect(not south.is_empty() and south["room_id"] == Vector2i(11, 10),
+		"corner south exit missing: %s" % str(south))
+	if not south.is_empty():
+		_expect(south["cell"] == Vector2i(1, 1), "corner south landed on %s, expected (1,1)" % south["cell"])
+	var east := _room_world.find_room_exit(room_l, Vector2i(3, 3), Vector2i(1, 0))
+	_expect(not east.is_empty() and east["cell"] == Vector2i(2, 0),
+		"corner east landed on %s, expected (2,0)" % str(east.get("cell")))
+
+	# Bottom edge cell (1,7): east enters B at local (0,4), but south
+	# steps into empty world — a lone auto connection must not fire.
+	var void_step := _room_world.find_room_exit(room_l, Vector2i(1, 7), Vector2i(0, 1))
+	_expect(void_step.is_empty(), "void step at shaped corner returned a connection: %s" % str(void_step))
+	var into_b := _room_world.find_room_exit(room_l, Vector2i(1, 7), Vector2i(1, 0))
+	_expect(not into_b.is_empty() and into_b["cell"] == Vector2i(0, 4),
+		"edge east landed on %s, expected (0,4)" % str(into_b.get("cell")))
+
+	# Player-level: the void step bumps instead of being pushed into B;
+	# the real step transitions and lands on the stepped cell.
+	_place_player(Vector2i(10, 10), Vector2i(1, 7))
+	_player.request_move(Vector2i(0, 1))
+	_expect(_player.room != null and _player.room.room_coordinates == Vector2i(10, 10),
+		"void step pushed player into another room")
+	_expect(_player.grid_position == Vector2i(1, 7), "void step moved player to %s" % _player.grid_position)
+	_player.request_move(Vector2i(1, 0))
+	_expect(_player.room != null and _player.room.room_coordinates == Vector2i(11, 10),
+		"edge step into B failed, room is %s" % (_player.room.room_coordinates if _player.room != null else "<none>"))
+	_expect(_player.grid_position == Vector2i(0, 4), "edge step landed on %s, expected (0,4)" % _player.grid_position)
 
 func _report() -> void:
 	if _failures.is_empty():

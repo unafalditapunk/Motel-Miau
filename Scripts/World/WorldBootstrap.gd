@@ -128,16 +128,37 @@ func _notification(what: int) -> void:
 		save_game()
 
 func _configure_room_world() -> void:
-	room_world.room_dimensions = room_definition.size
-	room_world.floor_texture = room_definition.floor_texture
-	room_world.default_tile_id = room_definition.default_tile_id
-	room_world.debug_coordinates = debug_coordinates
-	room_world.tile_catalog = tile_catalog
-	room_world.block_catalog = block_catalog
-	room_world.furniture_catalog = furniture_catalog
-	room_world.carpet_catalog = carpet_catalog
-	room_world.block_scene = block_scene
-	room_world.player_scene = player_scene
+	_configure_room_world_instance(room_world)
+
+## Applies this world's catalogs/scenes/grid settings to any RoomWorld
+## instance — the primary room_world and runtime floor worlds alike.
+func _configure_room_world_instance(world: RoomWorld) -> void:
+	world.grid = room_world.grid
+	world.room_dimensions = room_definition.size
+	world.floor_texture = room_definition.floor_texture
+	world.default_tile_id = room_definition.default_tile_id
+	world.debug_coordinates = debug_coordinates
+	world.tile_catalog = tile_catalog
+	world.block_catalog = block_catalog
+	world.furniture_catalog = furniture_catalog
+	world.carpet_catalog = carpet_catalog
+	world.block_scene = block_scene
+	world.player_scene = player_scene
+
+## Creates an empty, fully configured RoomWorld for a floor instance
+## (multiplayer: each occupied floor gets its own world so players can
+## stand on different floors simultaneously). The caller populates it
+## via FloorManager.materialize_runtime_floor. Added as a child of
+## this bootstrap; returns null when catalogs are missing.
+func create_floor_world(floor_id: StringName) -> RoomWorld:
+	if room_definition == null or tile_catalog == null:
+		push_error("WorldBootstrap.create_floor_world requires room_definition and catalogs.")
+		return null
+	var world := RoomWorld.new()
+	world.name = "FloorWorld_%s" % floor_id
+	_configure_room_world_instance(world)
+	add_child(world)
+	return world
 
 ## The floor's entry room (falling back to the first materialized room).
 func _floor_entry_room() -> Room:
@@ -162,6 +183,7 @@ func _spawn_player() -> void:
 		return
 	player = spawned
 	player.grid = room_world.grid
+	player.room_world = room_world
 	player.block_layer = block_layer
 	player.room = room
 	player.room_size = room.size

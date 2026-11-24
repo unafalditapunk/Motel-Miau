@@ -135,10 +135,11 @@ func find_exit(room: Room, local_cell: Vector2i, direction := Vector2i.ZERO) -> 
 	if room == null:
 		return {}
 	var room_id := room.room_coordinates
-	var matches: Array[Dictionary] = []
 	var neighbor_world := Vector2i.ZERO
-	if direction != Vector2i.ZERO:
+	var stepped := direction != Vector2i.ZERO
+	if stepped:
 		neighbor_world = room.world_cell_coordinates(local_cell) + direction
+	var matches: Array[Dictionary] = []
 	for connection in get_all_connections():
 		if connection.interactive:
 			continue
@@ -149,12 +150,33 @@ func find_exit(room: Room, local_cell: Vector2i, direction := Vector2i.ZERO) -> 
 		if not exits.has(local_cell):
 			continue
 		var entries: Array[Vector2i] = traversal["entries"]
-		matches.append({
+		var candidate := {
 			"connection": connection,
 			"room_id": traversal["room_id"],
 			"cell": connection.entry_for(exits, entries, local_cell),
 			"reversed": traversal["reversed"],
-		})
+		}
+		if stepped:
+			var dest_room := _room(candidate["room_id"])
+			var dest_local := neighbor_world - dest_room.cell_origin if dest_room != null else Vector2i.ZERO
+			var in_dest := dest_room != null and dest_room.has_footprint_cell(dest_local)
+			if _is_auto_connection(connection):
+				# Auto doors are purely geometric: they may only fire
+				# when the step actually enters the neighbor room's
+				# footprint. At a shaped room's concave corner the exit
+				# cell can border void cells — stepping into the notch
+				# must bump, not teleport into the room. The landing
+				# cell is the one actually stepped into.
+				if not in_dest:
+					continue
+				candidate["cell"] = dest_local
+			elif in_dest and entries.has(dest_local):
+				# Authored adjacent link: one exit cell can border
+				# several destination cells at concave corners, so the
+				# index-paired entry may point at the wrong cell —
+				# land on the declared entry actually stepped into.
+				candidate["cell"] = dest_local
+		matches.append(candidate)
 	if matches.is_empty():
 		return {}
 	# A single covering connection always wins: explicit connections may
@@ -183,6 +205,13 @@ func find_exit(room: Room, local_cell: Vector2i, direction := Vector2i.ZERO) -> 
 		push_warning("RoomConnectionManager: ambiguous exit at %s in room %s (%s); using '%s'." % [
 			local_cell, room_id, ", ".join(ids), str((matches[0]["connection"] as RoomConnection).connection_id)])
 	return matches[0]
+
+## Auto-generated adjacency doors carry ids of the form
+## "auto_<roomA>_<roomB>" (see RoomWorld._connect_adjacent_pair) and are
+## purely geometric — unlike authored connections they never link
+## non-adjacent rooms, so their exits may be direction-checked strictly.
+static func _is_auto_connection(connection: RoomConnection) -> bool:
+	return String(connection.connection_id).begins_with("auto_")
 
 ## Interactive entry lookup: returns the transition info when the player
 ## steps onto local_cell inside the room with room_id, or {}. When

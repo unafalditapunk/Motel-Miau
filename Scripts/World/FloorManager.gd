@@ -32,6 +32,23 @@ var active_floor: Floor
 var _by_id := {}
 var _hooked_world: RoomWorld
 var _dirty := false
+## Runtime RoomWorld instances hosting floors OTHER than the bound
+## room_world — multiplayer floor transitions give each occupied floor
+## its own world so players can stand on different floors at once.
+## Keys are floor_id; the bound world always serves active_floor.
+var runtime_worlds := {}
+
+## True while this manager must refuse local structural mutations:
+## the local peer is a multiplayer CLIENT whose world is rebuilt only
+## by authoritative snapshots/ops (Phase C). Server and single-player
+## return false. Internal replica paths — WorldSnapshot.apply,
+## load_floor_without_save, materialize_floor, apply_layout_data —
+## deliberately bypass the guarded mutators below.
+func structural_edits_readonly() -> bool:
+	return is_inside_tree() and MultiplayerManager.is_client(get_tree())
+
+func _refuse_readonly(what: String) -> void:
+	push_warning("FloorManager.%s refused: structural edits are read-only for multiplayer clients." % what)
 
 func _ready() -> void:
 	# Always scan: register_floor() deduplicates, so floors registered
@@ -88,6 +105,19 @@ func _floor_from_saved_data(data: Dictionary) -> Floor:
 # ------------------------------------------------------------------
 
 func register_floor(floor_def: Floor) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("register_floor")
+		return false
+	return _register_floor(floor_def)
+
+## Registers a Floor rebuilt from network data (WorldSnapshot floor
+## definitions, floor transitions). Bypasses the readonly guard: this
+## is replica state arriving from the server, not a local structural
+## edit — clients must be able to learn floors they did not create.
+func register_floor_replica(floor_def: Floor) -> bool:
+	return _register_floor(floor_def)
+
+func _register_floor(floor_def: Floor) -> bool:
 	if floor_def == null:
 		push_error("FloorManager.register_floor requires a Floor.")
 		return false
@@ -118,6 +148,26 @@ func floor_ids() -> Array[StringName]:
 	return ids
 
 func unregister_floor(floor_id: StringName) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("unregister_floor")
+		return false
+	return _unregister_floor(floor_id)
+
+## Unguarded unregister for replica state arriving from the server
+## (floor-delete broadcasts, snapshot catalog reconcile). Mirrors
+## register_floor_replica: never touches disk. Refuses to drop the
+## active floor — a client standing on a floor the server deleted is
+## a protocol divergence the caller must surface, not paper over.
+func unregister_floor_replica(floor_id: StringName) -> bool:
+	var floor_def := get_floor(floor_id)
+	if floor_def == null:
+		return false
+	if active_floor == floor_def:
+		push_warning("FloorManager.unregister_floor_replica: '%s' is the active floor; kept (divergence)." % floor_id)
+		return false
+	return _unregister_floor(floor_id)
+
+func _unregister_floor(floor_id: StringName) -> bool:
 	var floor_def := get_floor(floor_id)
 	if floor_def == null:
 		return false
@@ -134,6 +184,9 @@ func unregister_floor(floor_id: StringName) -> bool:
 ## first spec's room center. Returns the Floor, or null when the id
 ## is unusable/duplicate or the layout fails validation.
 func create_floor(floor_id: StringName, display_name := "", room_specs: Array[FloorRoomSpec] = [], auto_connect := true) -> Floor:
+	if structural_edits_readonly():
+		_refuse_readonly("create_floor")
+		return null
 	if FloorSaveSystem.floor_dir(floor_id).is_empty():
 		push_error("FloorManager.create_floor: id '%s' cannot be used as a save directory." % floor_id)
 		return null
@@ -192,6 +245,9 @@ func can_delete_floor(floor_id: StringName) -> Dictionary:
 ## definition and removes its entire save directory. A failed switch
 ## aborts the delete with everything untouched.
 func delete_floor(floor_id: StringName) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("delete_floor")
+		return false
 	var verdict := can_delete_floor(floor_id)
 	if not verdict.get("allowed", false):
 		push_error("FloorManager.delete_floor: %s" % verdict.get("reason", "refused"))
@@ -393,6 +449,9 @@ func materialize_floor(floor_def: Floor, target_world: RoomWorld = null) -> bool
 ## room_world and marks it active. Does not load saved state; use
 ## load_floor()/switch_floor() for the persistence-aware path.
 func activate_floor(floor_id: StringName) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("activate_floor")
+		return false
 	var floor_def := get_floor(floor_id)
 	if floor_def == null:
 		push_error("FloorManager has no floor '%s'." % floor_id)
@@ -404,6 +463,90 @@ func activate_floor(floor_id: StringName) -> bool:
 	room_world.save_directory = floor_save_dir(floor_def.floor_id)
 	active_floor = floor_def
 	_dirty = true
+	return true
+
+# ------------------------------------------------------------------
+# Runtime floor instances (multiplayer)
+# ------------------------------------------------------------------
+
+## The RoomWorld currently hosting a floor: the bound room_world for
+## the active floor, a runtime_worlds entry for any other materialized
+## floor, or null when the floor has never been instantiated.
+func world_for_floor(floor_id: StringName) -> RoomWorld:
+	var floor_def := get_floor(floor_id)
+	if floor_def == null:
+		return null
+	if active_floor == floor_def and room_world != null:
+		return room_world
+	var world: Variant = runtime_worlds.get(floor_id)
+	return world as RoomWorld
+
+## Materializes a floor into a caller-provided RoomWorld and hydrates
+## its saved room contents/connections — the multiplayer counterpart
+## of load_floor for floors that are NOT the bound world. Unlike
+## load_floor it never touches active_floor, never emits
+## floor_switched, and hydrates via load_room_states so no
+## player_state.json is read or written (the local player does not
+## live in secondary worlds). On success the world is recorded in
+## runtime_worlds. Returns false on any validation failure.
+func materialize_runtime_floor(floor_id: StringName, world: RoomWorld) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("materialize_runtime_floor")
+		return false
+	var floor_def := get_floor(floor_id)
+	if floor_def == null or world == null:
+		push_error("FloorManager.materialize_runtime_floor requires a registered floor and a RoomWorld.")
+		return false
+	# Same layout-override discipline as load_floor: snapshot the specs
+	# so a refused load cannot poison the in-memory Floor.
+	var saved_specs := floor_def.rooms
+	var saved_entry := floor_def.entry_room_id
+	var saved_spawn := floor_def.spawn_position
+	_apply_layout_override(floor_def)
+	var problems := validate_floor(floor_def)
+	if not problems.is_empty():
+		floor_def.rooms = saved_specs
+		floor_def.entry_room_id = saved_entry
+		floor_def.spawn_position = saved_spawn
+		push_error("FloorManager.materialize_runtime_floor: floor '%s' is invalid: %s" % [
+			floor_id, ", ".join(problems)])
+		return false
+	world.save_directory = floor_save_dir(floor_id)
+	if not materialize_floor(floor_def, world):
+		return false
+	var expected := 0
+	for spec in floor_def.rooms:
+		if spec != null:
+			expected += 1
+	if world.registry.get_rooms().size() != expected:
+		push_error("FloorManager.materialize_runtime_floor: floor '%s' materialized %d rooms, expected %d." % [
+			floor_id, world.registry.get_rooms().size(), expected])
+		return false
+	_hook_world(world)
+	world.load_room_states()
+	# load_room_states replaces the graph with the saved one; re-run
+	# auto-connect afterwards, same as load_floor.
+	if floor_def.auto_connect_adjacent:
+		world.auto_connect_adjacent_rooms()
+	runtime_worlds[floor_id] = world
+	return true
+
+## Tears down a floor's runtime world: removes the dict entry and
+## frees the RoomWorld node. The CALLER must guarantee the world is
+## empty — no player bodies parented inside, no pending transition
+## targeting it (MultiplayerManager checks occupancy before calling).
+## Safe retention alternative: callers may simply leave the entry in
+## place; an unvisited floor's world costs one materialized RoomWorld.
+## Returns false when the floor had no runtime world.
+func release_runtime_world(floor_id: StringName) -> bool:
+	var world: Variant = runtime_worlds.get(floor_id)
+	if world == null:
+		return false
+	runtime_worlds.erase(floor_id)
+	if _hooked_world == world:
+		_hooked_world = null
+	if is_instance_valid(world):
+		(world as Node).queue_free()
 	return true
 
 # ------------------------------------------------------------------
@@ -470,6 +613,9 @@ func save_active_floor() -> bool:
 ## (switch_floor) is responsible for rollback — load_floor itself only
 ## mutates the world after validation passes.
 func load_floor(floor_id: StringName, target_world: RoomWorld = null) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("load_floor")
+		return false
 	var floor_def := get_floor(floor_id)
 	var world := target_world if target_world != null else room_world
 	if floor_def == null or world == null:
@@ -560,6 +706,9 @@ func load_floor_without_save(floor_id: StringName, target_world: RoomWorld = nul
 ##      rollback attempt back to the previous floor.
 ## Switching to the already-active floor reloads it (save + load).
 func switch_floor(floor_id: StringName) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("switch_floor")
+		return false
 	var dest := get_floor(floor_id)
 	if dest == null:
 		push_error("FloorManager has no floor '%s'." % floor_id)
@@ -590,43 +739,77 @@ func switch_floor(floor_id: StringName) -> bool:
 ## floor is marked dirty, and the layout override is written to
 ## user://floors/<id>/layout.json. Returns the created Room, or null.
 func add_room_to_active_floor(spec: FloorRoomSpec) -> Room:
+	if structural_edits_readonly():
+		_refuse_readonly("add_room_to_active_floor")
+		return null
 	var floor_def := active_floor
 	var world := room_world
 	if floor_def == null or world == null or spec == null:
 		push_error("FloorManager.add_room_to_active_floor requires an active floor, a RoomWorld, and a spec.")
 		return null
+	var result := _add_room_to_floor(floor_def, world, spec)
+	if not result.get("ok", false):
+		return null
+	_persist_room_layout(floor_def)
+	return result["room"]
+
+## Floor-scoped counterpart of add_room_to_active_floor for floors
+## hosted by a runtime world (multiplayer structural ops). Same
+## validation and persistence; resolves the world via world_for_floor
+## so room ids are never looked up globally. Returns the created Room
+## or null.
+func add_room_to_floor(floor_id: StringName, spec: FloorRoomSpec) -> Room:
+	if structural_edits_readonly():
+		_refuse_readonly("add_room_to_floor")
+		return null
+	var floor_def := get_floor(floor_id)
+	var world := world_for_floor(floor_id)
+	if floor_def == null or world == null or spec == null:
+		push_error("FloorManager.add_room_to_floor requires a registered floor with a runtime world and a spec.")
+		return null
+	var result := _add_room_to_floor(floor_def, world, spec)
+	if not result.get("ok", false):
+		return null
+	_persist_room_layout(floor_def)
+	return result["room"]
+
+## Validation + materialization half of room creation, floor-scoped
+## and persistence-free: callers decide whether to write layout.json.
+## Returns {"ok": bool, "room": Room, "spec": FloorRoomSpec,
+## "reason": String} — spec is the normalized spec actually appended
+## (origin/size rewritten to the footprint bbox), so broadcast
+## payloads carry exactly what was registered.
+func _add_room_to_floor(floor_def: Floor, world: RoomWorld, spec: FloorRoomSpec) -> Dictionary:
+	var refuse := func(reason: String) -> Dictionary:
+		push_error("FloorManager.add_room: %s" % reason)
+		return {"ok": false, "room": null, "spec": null, "reason": reason}
+	if floor_def == null or world == null or spec == null:
+		return refuse.call("requires a floor, a RoomWorld, and a spec.")
 	var sections := _spec_sections(spec)
 	if sections.is_empty():
-		push_error("FloorManager.add_room_to_active_floor: room %s has no resolvable size." % spec.room_id)
-		return null
+		return refuse.call("room %s has no resolvable size." % spec.room_id)
 	var bounds := _sections_bounds(sections)
 	if bounds.size.x < Floor.MIN_ROOM_DIMENSION or bounds.size.y < Floor.MIN_ROOM_DIMENSION:
-		push_error("FloorManager.add_room_to_active_floor: room %s bounds %s are below the %dx%d minimum." % [
+		return refuse.call("room %s bounds %s are below the %dx%d minimum." % [
 			spec.room_id, bounds.size, Floor.MIN_ROOM_DIMENSION, Floor.MIN_ROOM_DIMENSION])
-		return null
 	for section in sections:
 		if section.size.x < Floor.MIN_ROOM_DIMENSION or section.size.y < Floor.MIN_ROOM_DIMENSION:
-			push_error("FloorManager.add_room_to_active_floor: room %s section %s is below the %dx%d minimum." % [
+			return refuse.call("room %s section %s is below the %dx%d minimum." % [
 				spec.room_id, section, Floor.MIN_ROOM_DIMENSION, Floor.MIN_ROOM_DIMENSION])
-			return null
 	for i in range(sections.size()):
 		for j in range(i + 1, sections.size()):
 			if sections[i].intersects(sections[j]):
-				push_error("FloorManager.add_room_to_active_floor: room %s has overlapping shape sections." % spec.room_id)
-				return null
+				return refuse.call("room %s has overlapping shape sections." % spec.room_id)
 	if not _sections_connected(sections):
-		push_error("FloorManager.add_room_to_active_floor: room %s sections do not form one connected shape." % spec.room_id)
-		return null
+		return refuse.call("room %s sections do not form one connected shape." % spec.room_id)
 	for other in floor_def.rooms:
 		if other == null:
 			continue
 		if other.room_id == spec.room_id:
-			push_error("FloorManager.add_room_to_active_floor: room id %s is already used by this floor." % spec.room_id)
-			return null
+			return refuse.call("room id %s is already used by this floor." % spec.room_id)
 		if _sections_overlap(sections, _spec_sections(other)):
-			push_error("FloorManager.add_room_to_active_floor: room %s at %s overlaps room %s." % [
+			return refuse.call("room %s at %s overlaps room %s." % [
 				spec.room_id, bounds.position, other.room_id])
-			return null
 	# No orphan rooms: a new room must share an edge with an existing
 	# spec. An empty floor accepts its first room (it becomes entry).
 	if not floor_def.rooms.is_empty():
@@ -638,9 +821,8 @@ func add_room_to_active_floor(spec: FloorRoomSpec) -> Room:
 				touches = true
 				break
 		if not touches:
-			push_error("FloorManager.add_room_to_active_floor: room %s at %s does not share an edge with any room on floor '%s'." % [
+			return refuse.call("room %s at %s does not share an edge with any room on floor '%s'." % [
 				spec.room_id, bounds.position, floor_def.floor_id])
-			return null
 	# Normalize: global_origin/size become the footprint's bounding box
 	# so every rect-based consumer (bounds, saves, layout) stays exact.
 	spec.global_origin = bounds.position
@@ -648,7 +830,7 @@ func add_room_to_active_floor(spec: FloorRoomSpec) -> Room:
 	var was_empty := floor_def.rooms.is_empty()
 	var room := _create_room(world, spec)
 	if room == null:
-		return null
+		return refuse.call("room %s failed to materialize." % spec.room_id)
 	floor_def.rooms.append(spec)
 	if was_empty:
 		# First room on an empty floor becomes the entry/spawn so the
@@ -657,11 +839,9 @@ func add_room_to_active_floor(spec: FloorRoomSpec) -> Room:
 		floor_def.spawn_position = Vector2i(bounds.size.x >> 1, bounds.size.y >> 1)
 	if floor_def.auto_connect_adjacent:
 		world.auto_connect_adjacent_rooms()
-	_dirty = true
-	var error := save_floor_layout()
-	if error != OK:
-		push_warning("FloorManager.add_room_to_active_floor: room created but layout save failed (error %d)." % error)
-	return room
+	if floor_def == active_floor:
+		_dirty = true
+	return {"ok": true, "room": room, "spec": spec, "reason": ""}
 
 ## Reports whether a room may be deleted from the active floor.
 ## Returns {"allowed": bool, "reason": String}. A room is deletable
@@ -670,28 +850,40 @@ func add_room_to_active_floor(spec: FloorRoomSpec) -> Room:
 ## connections, and every edge-adjacent room keeps at least one other
 ## adjacent room afterwards.
 func can_delete_room(room_id: Vector2i) -> Dictionary:
+	return _can_delete_room(active_floor, room_world, room_id, {})
+
+## Floor-scoped counterpart for runtime worlds (multiplayer). occupied
+## maps room_id -> true for every authoritative body standing in that
+## room on this floor — the local "player" group only sees the server's
+## own avatar, so remote occupants must be passed in explicitly.
+func can_delete_room_on_floor(floor_id: StringName, room_id: Vector2i,
+		occupied: Dictionary = {}) -> Dictionary:
+	return _can_delete_room(get_floor(floor_id), world_for_floor(floor_id), room_id, occupied)
+
+func _can_delete_room(floor_def: Floor, world: RoomWorld, room_id: Vector2i,
+		occupied: Dictionary) -> Dictionary:
 	var refuse := func(reason: String) -> Dictionary:
 		return {"allowed": false, "reason": reason}
-	var floor_def := active_floor
-	var world := room_world
 	if floor_def == null or world == null:
-		return refuse.call("No active floor.")
+		return refuse.call("No floor world.")
 	var room := world.get_room(room_id)
 	if room == null:
 		return refuse.call("Room is not instantiated.")
 	if room.has_placed_contents():
 		return refuse.call("Room has placed contents.")
+	if occupied.has(room_id):
+		return refuse.call("A player occupies the room.")
 	var player := _player()
 	if player != null and player.room == room:
 		return refuse.call("Player is inside the room.")
-	var bounds := _floor_spec_bounds()
+	var bounds := _floor_spec_bounds_for(floor_def)
 	if bounds.size() <= 1:
 		return refuse.call("Cannot delete the last room on the floor.")
 	for connection in floor_def.connections:
 		if connection != null and (connection.source_room_id == room_id \
 				or connection.destination_room_id == room_id):
 			return refuse.call("Room has explicit floor connections.")
-	var all_sections := _floor_spec_sections()
+	var all_sections := _floor_spec_sections_for(floor_def)
 	var target_sections: Array[Rect2i] = all_sections.get(room_id, [])
 	for other_id in all_sections:
 		if other_id == room_id:
@@ -715,16 +907,42 @@ func can_delete_room(room_id: Vector2i) -> Dictionary:
 ## drops the spec, and persists the layout. Returns false (with the
 ## reason pushed to the console) when can_delete_room refuses.
 func remove_room_from_active_floor(room_id: Vector2i) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("remove_room_from_active_floor")
+		return false
 	var floor_def := active_floor
 	var world := room_world
 	if floor_def == null or world == null:
 		push_error("FloorManager.remove_room_from_active_floor requires an active floor and a RoomWorld.")
 		return false
-	var verdict := can_delete_room(room_id)
-	if not verdict.get("allowed", false):
-		push_error("FloorManager.remove_room_from_active_floor: %s" % verdict.get("reason", "refused"))
+	return _remove_room_from_floor(floor_def, world, room_id, {}, true)
+
+## Floor-scoped counterpart for runtime worlds (multiplayer structural
+## ops). occupied maps room_id -> true for authoritative bodies on this
+## floor; pass {} for the single-player/local-player check only.
+func remove_room_from_floor(floor_id: StringName, room_id: Vector2i,
+		occupied: Dictionary = {}) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("remove_room_from_floor")
 		return false
-	var all_sections := _floor_spec_sections()
+	var floor_def := get_floor(floor_id)
+	var world := world_for_floor(floor_id)
+	if floor_def == null or world == null:
+		push_error("FloorManager.remove_room_from_floor requires a registered floor with a runtime world.")
+		return false
+	return _remove_room_from_floor(floor_def, world, room_id, occupied, true)
+
+## Validation + mechanical removal shared by every delete path.
+## persist=true writes connections.json + layout.json (server/SP);
+## persist=false is the client replica path — the authoritative graph
+## arrives via broadcasts/snapshots, never local disk.
+func _remove_room_from_floor(floor_def: Floor, world: RoomWorld, room_id: Vector2i,
+		occupied: Dictionary, persist: bool) -> bool:
+	var verdict := _can_delete_room(floor_def, world, room_id, occupied)
+	if not verdict.get("allowed", false):
+		push_error("FloorManager.remove_room: %s" % verdict.get("reason", "refused"))
+		return false
+	var all_sections := _floor_spec_sections_for(floor_def)
 	var target_sections: Array[Rect2i] = all_sections.get(room_id, [])
 	# Runtime connections (auto + saved graph) touching the room go.
 	for connection in world.get_room_connections(room_id).duplicate():
@@ -756,23 +974,88 @@ func remove_room_from_active_floor(room_id: Vector2i) -> bool:
 		if spec != null and spec.room_id == room_id:
 			floor_def.rooms.remove_at(i)
 	world.unregister_room(room_id)
-	# Persist the pruned connection graph immediately — otherwise the
-	# stale connections.json would resurrect doors to the deleted room
-	# on the next load.
-	var conn_error := RoomSaveSystem.save_connections(world)
-	if conn_error != OK:
-		push_warning("FloorManager.remove_room_from_active_floor: connection save failed (error %d)." % conn_error)
-	_dirty = true
-	var error := save_floor_layout()
-	if error != OK:
-		push_warning("FloorManager.remove_room_from_active_floor: room deleted but layout save failed (error %d)." % error)
+	if persist:
+		# Persist the pruned connection graph immediately — otherwise
+		# the stale connections.json would resurrect doors to the
+		# deleted room on the next load.
+		var conn_error := RoomSaveSystem.save_connections(world)
+		if conn_error != OK:
+			push_warning("FloorManager.remove_room: connection save failed (error %d)." % conn_error)
+		_persist_room_layout(floor_def)
+	if floor_def == active_floor:
+		_dirty = true
 	return true
 
+## Sets both visibility flags on a room and its floor spec, optionally
+## persisting layout.json. Returns false when the room or spec is
+## missing on the given floor.
+func _set_room_visibility(floor_def: Floor, world: RoomWorld, room_id: Vector2i,
+		show_from_outside: bool, show_outside: bool, persist: bool) -> bool:
+	if floor_def == null or world == null:
+		return false
+	var room := world.get_room(room_id)
+	var spec := floor_def.find_room_spec(room_id)
+	if room == null or spec == null:
+		return false
+	room.show_from_outside = show_from_outside
+	room.show_outside = show_outside
+	spec.show_from_outside = show_from_outside
+	spec.show_outside = show_outside
+	if persist:
+		_persist_room_layout(floor_def)
+	return true
+
+## Server/SP entry point: visibility change on any floor with a
+## runtime world. Floor-scoped so room ids never resolve globally.
+func set_room_visibility_on_floor(floor_id: StringName, room_id: Vector2i,
+		show_from_outside: bool, show_outside: bool) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("set_room_visibility_on_floor")
+		return false
+	return _set_room_visibility(get_floor(floor_id), world_for_floor(floor_id),
+		room_id, show_from_outside, show_outside, true)
+
+## ------------------------------------------------------------------
+## Replica apply (multiplayer clients): unguarded, persistence-free
+## counterparts of the mutation cores. WorldSnapshot.apply and these
+## ops are the ONLY ways a client world changes — they never write
+## user:// and never re-request. floor_id must be the client's own
+## replicated floor; callers filter before invoking.
+## ------------------------------------------------------------------
+
+## Applies an authoritative room creation. spec_entry is the
+## FloorSaveSystem.spec_to_layout_entry shape carried by the broadcast.
+func replica_add_room(floor_id: StringName, spec_entry: Dictionary) -> Room:
+	var floor_def := get_floor(floor_id)
+	if floor_def == null or room_world == null or not (spec_entry is Dictionary):
+		return null
+	var spec := spec_from_layout_entry(spec_entry)
+	if spec == null:
+		return null
+	var result := _add_room_to_floor(floor_def, room_world, spec)
+	return result.get("room") if result.get("ok", false) else null
+
+## Applies an authoritative room deletion on the client's replica.
+func replica_remove_room(floor_id: StringName, room_id: Vector2i) -> bool:
+	var floor_def := get_floor(floor_id)
+	if floor_def == null or room_world == null:
+		return false
+	return _remove_room_from_floor(floor_def, room_world, room_id, {}, false)
+
+## Applies an authoritative visibility change on the client's replica.
+func replica_set_room_visibility(floor_id: StringName, room_id: Vector2i,
+		show_from_outside: bool, show_outside: bool) -> bool:
+	var floor_def := get_floor(floor_id)
+	if floor_def == null or room_world == null:
+		return false
+	return _set_room_visibility(floor_def, room_world, room_id,
+		show_from_outside, show_outside, false)
+
 ## room_id -> global bounds Rect2i for every spec with a resolvable
-## size on the active floor.
-func _floor_spec_bounds() -> Dictionary:
+## size on the given floor (active_floor when null is NOT assumed —
+## callers pass the floor explicitly).
+func _floor_spec_bounds_for(floor_def: Floor) -> Dictionary:
 	var bounds := {}
-	var floor_def := active_floor
 	if floor_def == null:
 		return bounds
 	for spec in floor_def.rooms:
@@ -784,11 +1067,13 @@ func _floor_spec_bounds() -> Dictionary:
 		bounds[spec.room_id] = footprint
 	return bounds
 
+func _floor_spec_bounds() -> Dictionary:
+	return _floor_spec_bounds_for(active_floor)
+
 ## room_id -> Array[Rect2i] of global footprint sections for every
-## spec on the active floor. Cell-exact adjacency for shaped rooms.
-func _floor_spec_sections() -> Dictionary:
+## spec on the given floor. Cell-exact adjacency for shaped rooms.
+func _floor_spec_sections_for(floor_def: Floor) -> Dictionary:
 	var sections := {}
-	var floor_def := active_floor
 	if floor_def == null:
 		return sections
 	for spec in floor_def.rooms:
@@ -799,6 +1084,17 @@ func _floor_spec_sections() -> Dictionary:
 			continue
 		sections[spec.room_id] = footprint
 	return sections
+
+func _floor_spec_sections() -> Dictionary:
+	return _floor_spec_sections_for(active_floor)
+
+## Writes a floor's layout.json regardless of which world hosts it —
+## floor-scoped persistence for runtime worlds.
+func _persist_room_layout(floor_def: Floor) -> void:
+	var error := FloorSaveSystem.save_layout(floor_def)
+	if error != OK:
+		push_warning("FloorManager: layout save for floor '%s' failed (error %d)." % [
+			floor_def.floor_id if floor_def != null else &"?", error])
 
 static func _id_text(room_id: Vector2i) -> String:
 	return "(%d, %d)" % [room_id.x, room_id.y]
@@ -849,31 +1145,10 @@ func _apply_layout_entries(floor_def: Floor, data: Dictionary) -> void:
 		if not (entry is Dictionary):
 			push_warning("FloorManager: skipping malformed layout entry in floor '%s'." % floor_def.floor_id)
 			continue
-		var spec := FloorRoomSpec.new()
-		spec.room_id = _layout_vec2i(entry.get("room_id"))
-		spec.global_origin = _layout_vec2i(entry.get("global_origin"))
-		spec.size = _layout_vec2i(entry.get("size"))
-		var definition_path := str(entry.get("definition", ""))
-		if not definition_path.is_empty() and ResourceLoader.exists(definition_path):
-			spec.room_definition = ResourceLoader.load(definition_path) as RoomDefinition
-		var colors: Array[Color] = []
-		for color_text in entry.get("floor_colors", []):
-			colors.append(Color.html(str(color_text)))
-		spec.floor_colors = colors
-		# Missing keys (older layout.json) default to visible.
-		spec.show_from_outside = bool(entry.get("show_from_outside", true))
-		spec.show_outside = bool(entry.get("show_outside", true))
-		var sections: Array[Rect2i] = []
-		for raw in entry.get("sections", []):
-			if raw is Array and (raw as Array).size() == 4:
-				sections.append(Rect2i(int(raw[0]), int(raw[1]), int(raw[2]), int(raw[3])))
-		spec.shape_sections = sections
-		# Shaped specs normalize origin/size to the footprint bbox.
-		if not sections.is_empty():
-			var footprint := spec.bounds()
-			if footprint.size != Vector2i.ZERO:
-				spec.global_origin = footprint.position
-				spec.size = footprint.size
+		var spec := spec_from_layout_entry(entry)
+		if spec == null:
+			push_warning("FloorManager: skipping malformed layout entry in floor '%s'." % floor_def.floor_id)
+			continue
 		specs.append(spec)
 	if specs.is_empty():
 		return
@@ -893,6 +1168,38 @@ static func _layout_vec2i(value: Variant) -> Vector2i:
 	if value is Array and (value as Array).size() >= 2:
 		return Vector2i(int(value[0]), int(value[1]))
 	return Vector2i.ZERO
+
+## Parses one layout-entry Dictionary (the shape FloorSaveSystem.
+## spec_to_layout_entry emits and layout.json stores) into a
+## FloorRoomSpec, or null when the entry is unusable. Shared by the
+## layout-override path and the multiplayer structural-ops protocol.
+static func spec_from_layout_entry(entry: Dictionary) -> FloorRoomSpec:
+	var spec := FloorRoomSpec.new()
+	spec.room_id = _layout_vec2i(entry.get("room_id"))
+	spec.global_origin = _layout_vec2i(entry.get("global_origin"))
+	spec.size = _layout_vec2i(entry.get("size"))
+	var definition_path := str(entry.get("definition", ""))
+	if not definition_path.is_empty() and ResourceLoader.exists(definition_path):
+		spec.room_definition = ResourceLoader.load(definition_path) as RoomDefinition
+	var colors: Array[Color] = []
+	for color_text in entry.get("floor_colors", []):
+		colors.append(Color.html(str(color_text)))
+	spec.floor_colors = colors
+	# Missing keys (older layout.json) default to visible.
+	spec.show_from_outside = bool(entry.get("show_from_outside", true))
+	spec.show_outside = bool(entry.get("show_outside", true))
+	var sections: Array[Rect2i] = []
+	for raw in entry.get("sections", []):
+		if raw is Array and (raw as Array).size() == 4:
+			sections.append(Rect2i(int(raw[0]), int(raw[1]), int(raw[2]), int(raw[3])))
+	spec.shape_sections = sections
+	# Shaped specs normalize origin/size to the footprint bbox.
+	if not sections.is_empty():
+		var footprint := spec.bounds()
+		if footprint.size != Vector2i.ZERO:
+			spec.global_origin = footprint.position
+			spec.size = footprint.size
+	return spec
 
 func _player() -> Player:
 	if not is_inside_tree():
@@ -942,6 +1249,7 @@ func _ensure_player_placement(world: RoomWorld, floor_def: Floor) -> void:
 	# lands somewhere they cannot move.
 	if not entry.has_cell(spawn):
 		spawn = _nearest_room_cell(entry, spawn)
+	player.room_world = world
 	player.room = entry
 	player.block_layer = entry.block_layer
 	player.room_size = entry.size

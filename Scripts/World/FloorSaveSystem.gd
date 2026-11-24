@@ -172,23 +172,7 @@ static func layout_data(floor_def: Floor) -> Dictionary:
 	for spec in floor_def.rooms:
 		if spec == null:
 			continue
-		var entry := {
-			"room_id": [spec.room_id.x, spec.room_id.y],
-			"global_origin": [spec.global_origin.x, spec.global_origin.y],
-			"size": [spec.size.x, spec.size.y],
-			"definition": spec.room_definition.resource_path if spec.room_definition != null else "",
-			"floor_colors": [],
-			"show_from_outside": spec.show_from_outside,
-			"show_outside": spec.show_outside,
-		}
-		for color in spec.floor_colors:
-			entry["floor_colors"].append(color.to_html())
-		if not spec.shape_sections.is_empty():
-			var sections: Array = []
-			for section in spec.shape_sections:
-				sections.append([section.position.x, section.position.y, section.size.x, section.size.y])
-			entry["sections"] = sections
-		entries.append(entry)
+		entries.append(spec_to_layout_entry(spec))
 	return {
 		"version": VERSION,
 		"floor_save": true,
@@ -197,6 +181,29 @@ static func layout_data(floor_def: Floor) -> Dictionary:
 		"spawn_position": [floor_def.spawn_position.x, floor_def.spawn_position.y],
 		"rooms": entries,
 	}
+
+## One room spec as a layout-entry Dictionary — the same shape
+## layout_data() emits per room and load_layout() returns per entry.
+## Used by save_layout, WorldSnapshot, and the multiplayer structural
+## ops protocol (room create requests carry this shape).
+static func spec_to_layout_entry(spec: FloorRoomSpec) -> Dictionary:
+	var entry := {
+		"room_id": [spec.room_id.x, spec.room_id.y],
+		"global_origin": [spec.global_origin.x, spec.global_origin.y],
+		"size": [spec.size.x, spec.size.y],
+		"definition": spec.room_definition.resource_path if spec.room_definition != null else "",
+		"floor_colors": [],
+		"show_from_outside": spec.show_from_outside,
+		"show_outside": spec.show_outside,
+	}
+	for color in spec.floor_colors:
+		entry["floor_colors"].append(color.to_html())
+	if not spec.shape_sections.is_empty():
+		var sections: Array = []
+		for section in spec.shape_sections:
+			sections.append([section.position.x, section.position.y, section.size.x, section.size.y])
+		entry["sections"] = sections
+	return entry
 
 ## Writes the floor's current room specs as its layout override.
 static func save_layout(floor_def: Floor) -> Error:
@@ -262,6 +269,22 @@ static func load_layout(floor_id: StringName) -> Dictionary:
 ## created floor survives restarts without any res:// change. The file
 ## reuses the layout.json spec shape plus floor-level fields.
 
+## The floor_def.json payload as a Dictionary (layout_data plus
+## floor-level fields) without touching disk. Used by
+## save_floor_definition and by WorldSnapshot, which ships the same
+## format to clients so they can register floors the server created.
+static func floor_definition_data(floor_def: Floor) -> Dictionary:
+	var data := layout_data(floor_def)
+	data["display_name"] = floor_def.display_name
+	data["auto_connect_adjacent"] = floor_def.auto_connect_adjacent
+	data["metadata"] = floor_def.metadata
+	var connections: Array = []
+	for connection in floor_def.connections:
+		if connection != null:
+			connections.append(connection_to_dict(connection))
+	data["connections"] = connections
+	return data
+
 ## Writes the floor's complete definition. Returns the write Error.
 static func save_floor_definition(floor_def: Floor) -> Error:
 	if floor_def == null:
@@ -274,21 +297,12 @@ static func save_floor_definition(floor_def: Floor) -> Error:
 	if DirAccess.make_dir_recursive_absolute(dir) != OK:
 		push_error("FloorSaveSystem could not create floor save dir '%s'." % dir)
 		return ERR_CANT_CREATE
-	var data := layout_data(floor_def)
-	data["display_name"] = floor_def.display_name
-	data["auto_connect_adjacent"] = floor_def.auto_connect_adjacent
-	data["metadata"] = floor_def.metadata
-	var connections: Array = []
-	for connection in floor_def.connections:
-		if connection != null:
-			connections.append(connection_to_dict(connection))
-	data["connections"] = connections
 	var path := dir.path_join(FLOOR_DEF_NAME)
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	if file == null:
 		push_error("FloorSaveSystem could not open '%s': %s" % [path, error_string(FileAccess.get_open_error())])
 		return FileAccess.get_open_error()
-	file.store_string(JSON.stringify(data, "\t"))
+	file.store_string(JSON.stringify(floor_definition_data(floor_def), "\t"))
 	file.close()
 	return OK
 

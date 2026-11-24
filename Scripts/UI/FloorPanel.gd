@@ -32,6 +32,7 @@ var panel_open := false:
 var _root: PanelContainer
 var _list_box: VBoxContainer
 var _status_label: Label
+var _hint_label: Label
 var _new_floor_button: Button
 var _create_box: VBoxContainer
 var _id_edit: LineEdit
@@ -93,6 +94,39 @@ func _resolve_floor_manager() -> FloorManager:
 		floor_manager = world.floor_manager
 	return floor_manager
 
+var _net_hooked := false
+
+## The MultiplayerManager node, or null in single-player.
+func _resolve_net() -> MultiplayerManager:
+	return get_tree().get_first_node_in_group(&"multiplayer_manager") as MultiplayerManager
+
+## Connects floor_result once so accepted/rejected floor ops refresh
+## the list and status even while the panel stays open. Called from
+## _rebuild_list and the request handlers — the net node may not
+## exist yet when the panel first readies.
+func _ensure_net_hook() -> void:
+	if _net_hooked:
+		return
+	var net := _resolve_net()
+	if net == null:
+		return
+	_net_hooked = true
+	net.floor_result.connect(_on_floor_result)
+
+func _on_floor_result(_op_id: int, accepted: bool, reason: StringName,
+		payload: Dictionary) -> void:
+	if accepted:
+		var floor_id := String(payload.get("floor_id", "?"))
+		if String(payload.get("op", "")) == "floor_create":
+			var def: Variant = payload.get("floor_def", {})
+			var label := String(def.get("display_name", "")) if def is Dictionary else ""
+			_set_status("Created floor '%s' (%s)." % [label if not label.is_empty() else floor_id, floor_id], false)
+		else:
+			_set_status("Deleted floor '%s'." % floor_id, false)
+	else:
+		_set_status("Floor op rejected: %s" % reason, true)
+	_rebuild_list()
+
 func _rebuild_list() -> void:
 	for child in _list_box.get_children():
 		child.queue_free()
@@ -102,6 +136,17 @@ func _rebuild_list() -> void:
 	if manager == null:
 		_add_info_row("No FloorManager available.")
 		return
+	# Multiplayer clients see the floor list read-only for structural
+	# edits, but Enter stays enabled: it sends a server-authoritative
+	# floor TRAVEL request (Phase C2) rather than a local switch.
+	# Create/Delete also work on clients — they send floor-op requests
+	# (Phase C4) the server validates and broadcasts back.
+	var readonly := manager.structural_edits_readonly()
+	_ensure_net_hook()
+	if readonly:
+		_hint_label.text = "[F7] close · travel via Enter · floor edits are server requests"
+	else:
+		_hint_label.text = "[F7] close"
 	if manager.floors.is_empty():
 		_add_info_row("No floors registered.")
 		return
@@ -164,7 +209,8 @@ func _make_floor_row(manager: FloorManager, floor_def: Floor) -> Control:
 	del.name = "DeleteButton"
 	del.text = "Del"
 	del.custom_minimum_size = Vector2(40.0, 24.0)
-	# The last remaining floor can never be deleted.
+	# The last remaining floor can never be deleted; multiplayer
+	# clients send a server request and let the server decide.
 	del.disabled = manager.floors.size() <= 1
 	del.set_meta(&"floor_id", floor_def.floor_id)
 	PixelUi.style_button(del, true)
@@ -200,6 +246,15 @@ func _on_enter_pressed(floor_id: StringName) -> void:
 	if manager == null:
 		_set_status("No FloorManager available.", true)
 		return
+	if manager.structural_edits_readonly():
+		# Client: never switch locally — ask the server to move this
+		# peer's body. The destination snapshot arrives async.
+		var net := get_tree().get_first_node_in_group(&"multiplayer_manager") as MultiplayerManager
+		if net == null or not net.request_floor_transition(floor_id):
+			_set_status("Could not request travel to '%s'." % floor_id, true)
+		else:
+			_set_status("Requesting travel to %s..." % floor_id, false)
+		return
 	if manager.active_floor != null and manager.active_floor.floor_id == floor_id:
 		return
 	_set_status("Traveling to %s..." % floor_id, false)
@@ -214,6 +269,14 @@ func _on_delete_pressed(floor_id: StringName) -> void:
 	var manager := _resolve_floor_manager()
 	if manager == null:
 		_set_status("No FloorManager available.", true)
+		return
+	if manager.structural_edits_readonly():
+		# Client: ask the server — it rejects occupied/last floors.
+		var net := _resolve_net()
+		if net == null or not net.request_floor_delete(floor_id):
+			_set_status("Could not request delete of '%s'." % floor_id, true)
+		else:
+			_set_status("Requesting delete of '%s'..." % floor_id, false)
 		return
 	if manager.delete_floor(floor_id):
 		_set_status("Deleted floor '%s'." % floor_id, false)
@@ -232,6 +295,15 @@ func _on_create_floor_pressed() -> void:
 	var id_text := _id_edit.text.strip_edges()
 	if id_text.is_empty():
 		_set_status("Floor id is required.", true)
+		return
+	if manager.structural_edits_readonly():
+		# Client: ask the server; the canonical definition is derived
+		# server-side and arrives via floor_result.
+		var net := _resolve_net()
+		if net == null or not net.request_floor_create(StringName(id_text), _name_edit.text.strip_edges()):
+			_set_status("Could not request floor '%s'." % id_text, true)
+		else:
+			_set_status("Requesting floor '%s'..." % id_text, false)
 		return
 	var floor_def := manager.create_floor(StringName(id_text), _name_edit.text.strip_edges())
 	if floor_def == null:
@@ -296,6 +368,7 @@ func _build_ui() -> void:
 	var hint := Label.new()
 	hint.text = "[F7] close"
 	PixelUi.style_label(hint, PixelUi.TEXT_DIM, 9, true)
+	_hint_label = hint
 	vbox.add_child(hint)
 
 	var scroll := ScrollContainer.new()

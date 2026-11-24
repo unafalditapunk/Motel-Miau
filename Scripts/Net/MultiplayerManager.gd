@@ -67,17 +67,54 @@ var _build_op_serial := 0
 ## increasing per session, so anything <= the max is a replay — this
 ## rejects replays forever, unlike a sliding window.
 var _build_op_max := {}
+## Server: peer_id -> floor_id the peer's body currently occupies.
+## Each floor has its own RoomWorld instance, so players can stand on
+## different floors simultaneously. The bound room_world always serves
+## the FloorManager's active (boot) floor.
+var _peer_floor := {}
+## Client: floor_id of the locally replicated world — set from the
+## join snapshot and every accepted transition. Avatar spawn/state and
+## build-result payloads are filtered against it.
+var _my_floor_id := &""
+## Client: a transition request is in flight — input and build requests
+## stay locked until the destination snapshot applies or a rejection
+## arrives.
+var _transition_pending := false
+## Debug: --travel=<floor_id> (repeatable) requests transitions in
+## order once synced — live verification of floor transitions.
+var _debug_travels: Array = []
 ## Debug: --build-op=place:x,y:category:id[:rot[:flip]] (repeatable)
 ## and --build-op=remove:x,y run once each after sync for headless
 ## live tests; --dump-world=N delays the dump N sec.
 var _debug_ops: Array = []
+## Debug: --struct-op=create:rx,ry:ox,oy:w,h | delete:rx,ry |
+## vis:rx,ry:from,out (repeatable) — structural room requests fired
+## once each after sync for headless live tests.
+var _debug_struct_ops: Array = []
+## Debug: --floor-op=create:id[:name] | delete:id (repeatable) —
+## floor catalog requests fired once each after sync.
+var _debug_floor_ops: Array = []
 var _synced_msec := -1
 var _dump_at_msec := 0
 ## Client UI feedback: emitted for every build result this peer
 ## receives (accepted or rejected).
 signal build_result(op_id: int, accepted: bool, reason: StringName)
+## Client UI feedback: emitted when a floor-transition request is
+## accepted (world rebuilt, player placed) or rejected (reason set).
+signal transition_result(accepted: bool, reason: StringName)
 const SNAPSHOT_CHUNK_SIZE := 49152
 const SNAPSHOT_TIMEOUT_MS := 15000
+
+## True when the local peer is a multiplayer CLIENT. Structural world
+## mutations (floor/room/layout management) are server-authoritative
+## and must stay read-only on clients until their RPCs exist. The
+## manager joins group "multiplayer_manager" in setup(); single-player
+## has no node at all and dedicated servers report SERVER.
+static func is_client(tree: SceneTree) -> bool:
+	if tree == null:
+		return false
+	var mgr := tree.get_first_node_in_group(&"multiplayer_manager") as MultiplayerManager
+	return mgr != null and mgr.mode == Mode.CLIENT
 
 ## Parses launch args into {mode, address, port}; empty dict = no net.
 static func parse_args(args: PackedStringArray) -> Dictionary:
@@ -97,10 +134,22 @@ static func parse_args(args: PackedStringArray) -> Dictionary:
 			result["dump_world"] = true
 			if arg.contains("="):
 				result["dump_delay"] = arg.get_slice("=", 1).to_float()
+		elif arg.begins_with("--travel="):
+			if not result.has("travels"):
+				result["travels"] = []
+			(result["travels"] as Array).append(arg.get_slice("=", 1))
+		elif arg.begins_with("--floor-op="):
+			if not result.has("floor_ops"):
+				result["floor_ops"] = []
+			(result["floor_ops"] as Array).append(arg.get_slice("=", 1))
 		elif arg.begins_with("--build-op="):
 			if not result.has("build_ops"):
 				result["build_ops"] = []
 			(result["build_ops"] as Array).append(arg.get_slice("=", 1))
+		elif arg.begins_with("--struct-op="):
+			if not result.has("struct_ops"):
+				result["struct_ops"] = []
+			(result["struct_ops"] as Array).append(arg.get_slice("=", 1))
 		elif arg.begins_with("--build-place="):
 			# Legacy single-op form: x,y:id -> block place.
 			if not result.has("build_ops"):
@@ -163,6 +212,10 @@ func setup(world: WorldBootstrap, args: Dictionary) -> void:
 	_dump_at_msec = Time.get_ticks_msec() \
 		+ int(float(args.get("dump_delay", 0.0)) * 1000.0)
 	_debug_ops = _parse_build_ops(args.get("build_ops", []))
+	_debug_struct_ops = _parse_struct_ops(args.get("struct_ops", []))
+	_debug_floor_ops = _parse_floor_ops(args.get("floor_ops", []))
+	for travel in args.get("travels", []):
+		_debug_travels.append(StringName(str(travel)))
 
 func _process(delta: float) -> void:
 	if mode == Mode.CLIENT:
@@ -176,6 +229,16 @@ func _process(delta: float) -> void:
 		_world_dumped = true
 		_dump_world_state("peer%d" % my_peer_id)
 	_run_debug_build_ops()
+	_run_debug_struct_ops()
+	_run_debug_floor_ops()
+	# --travel=<floor_id> (repeatable): request floor transitions in
+	# order once the client is world-synced and not mid-transition.
+	if mode == Mode.CLIENT and world_synced and not _transition_pending \
+			and not _debug_travels.is_empty():
+		var next_travel := StringName(str(_debug_travels[0]))
+		_debug_travels.remove_at(0)
+		var ok := request_floor_transition(next_travel)
+		print("MultiplayerManager: --travel '%s' request -> %s" % [next_travel, ok])
 	# Server: drop peers that never acknowledged their snapshot.
 	if mode == Mode.SERVER and not _pending_peers.is_empty():
 		var now := Time.get_ticks_msec()
@@ -202,9 +265,32 @@ func _process(delta: float) -> void:
 	player.request_move(_autowalk_dir)
 
 ## Prints every room's id, size, and placed contents (blocks with
-## positions, furniture/carpet/tile counts) for --dump-world.
+## positions, furniture/carpet/tile counts) for --dump-world. On the
+## server every materialized floor world is dumped (tagged by floor);
+## clients only ever host their own floor's replica.
 func _dump_world_state(tag: String) -> void:
-	var world := _world.room_world
+	var fm := _world.floor_manager
+	var worlds: Array = []
+	var world_floors := {}
+	if _world.room_world != null:
+		worlds.append(_world.room_world)
+		if fm != null and fm.active_floor != null:
+			world_floors[_world.room_world] = fm.active_floor.floor_id
+	if mode == Mode.SERVER and fm != null:
+		for floor_id in fm.runtime_worlds:
+			var w: RoomWorld = fm.runtime_worlds[floor_id]
+			if w != null and not worlds.has(w):
+				worlds.append(w)
+				world_floors[w] = floor_id
+	if mode == Mode.SERVER and not _peer_floor.is_empty():
+		var floors := {}
+		for peer_id in _peer_floor:
+			floors[peer_id] = _peer_floor[peer_id]
+		print("WORLD_DUMP %s peer_floors=%s" % [tag, floors])
+	for world in worlds:
+		_dump_world_rooms(tag, world, world_floors.get(world, &"?"))
+
+func _dump_world_rooms(tag: String, world: RoomWorld, floor_id: StringName) -> void:
 	for room in world.get_rooms():
 		var counts: Dictionary = room.placed_content_counts()
 		var blocks: Array[String] = []
@@ -231,12 +317,11 @@ func _dump_world_state(tag: String) -> void:
 			if cell.carpet != null and cell.carpet_anchor == local_cell:
 				carpets.append("%s@%s" % [cell.carpet.object_id, local_cell])
 		print("WORLD_DUMP %s floor=%s room=%s size=%s blocks=[%s] tiles=[%s] carpets=[%s] contents=%s" % [
-			tag, _world.floor_manager.active_floor.floor_id \
-				if _world.floor_manager.active_floor != null else &"?",
+			tag, floor_id,
 			room.room_coordinates, room.size, ", ".join(blocks),
 			", ".join(tiles), ", ".join(carpets), counts])
 	var conns: Array = world.connections.serialize_all()
-	print("WORLD_DUMP %s connections=%d" % [tag, conns.size()])
+	print("WORLD_DUMP %s floor=%s connections=%d" % [tag, floor_id, conns.size()])
 
 func _exit_tree() -> void:
 	if multiplayer != null and multiplayer.multiplayer_peer != null:
@@ -254,11 +339,15 @@ func _on_peer_connected(peer_id: int) -> void:
 	_pending_peers[peer_id] = Time.get_ticks_msec()
 	_send_world_snapshot(peer_id)
 
-## Builds the authoritative snapshot from the server's live world and
-## streams it as reliable JSON chunks. Generated per join so a player
-## connecting mid-session receives current state, not a stale copy.
-func _send_world_snapshot(peer_id: int) -> void:
-	var snapshot := WorldSnapshot.build(_world.floor_manager, _world.room_world)
+## Builds the authoritative snapshot for the peer's CURRENT floor and
+## streams it as reliable JSON chunks. Generated per join/transition
+## so a player always receives current state, not a stale copy.
+## purpose is "join" (first sync — replies _rpc_world_ready) or
+## "travel" (floor transition — applies + places, no world_ready).
+func _send_world_snapshot(peer_id: int, snapshot: Dictionary = {},
+		purpose := "join") -> void:
+	if snapshot.is_empty():
+		snapshot = WorldSnapshot.build(_world.floor_manager, _world.room_world)
 	if snapshot.is_empty():
 		push_error("MultiplayerManager: cannot snapshot world for peer %d." % peer_id)
 		return
@@ -266,7 +355,7 @@ func _send_world_snapshot(peer_id: int) -> void:
 	var total := maxi(1, ceili(float(bytes.size()) / SNAPSHOT_CHUNK_SIZE))
 	var snap_id := _snapshot_serial
 	_snapshot_serial += 1
-	_rpc_snapshot_begin.rpc_id(peer_id, snap_id, total)
+	_rpc_snapshot_begin.rpc_id(peer_id, snap_id, total, purpose)
 	for index in range(total):
 		var part := bytes.slice(index * SNAPSHOT_CHUNK_SIZE,
 			mini((index + 1) * SNAPSHOT_CHUNK_SIZE, bytes.size()))
@@ -275,25 +364,58 @@ func _send_world_snapshot(peer_id: int) -> void:
 	print("MultiplayerManager: snapshot for peer %d sent (%d bytes, %d chunk(s))." % [
 		peer_id, bytes.size(), total])
 
+## The floor the bound room_world currently hosts (the boot/active
+## floor — the only floor that never gets a runtime_worlds entry).
+func _primary_floor_id() -> StringName:
+	var fm := _world.floor_manager if _world != null else null
+	if fm != null and fm.active_floor != null:
+		return fm.active_floor.floor_id
+	return &""
+
+## RoomWorld hosting a floor: the bound world for the active floor,
+## a runtime_worlds entry otherwise.
+func _world_for_floor(floor_id: StringName) -> RoomWorld:
+	if _world == null or _world.floor_manager == null:
+		return null
+	return _world.floor_manager.world_for_floor(floor_id)
+
+## RoomWorld a peer's body lives in (its current floor).
+func _world_for_peer(peer_id: int) -> RoomWorld:
+	return _world_for_floor(_peer_floor.get(peer_id, _primary_floor_id()))
+
+## floor_id a peer's body currently occupies.
+func _floor_id_for_peer(peer_id: int) -> StringName:
+	return _peer_floor.get(peer_id, _primary_floor_id())
+
 ## Client acknowledged its snapshot: now the peer gets a body and the
 ## usual spawn broadcast.
 func _complete_peer_join(peer_id: int) -> void:
 	var body := _spawn_body(peer_id)
 	if body == null:
 		return
+	_peer_floor[peer_id] = _primary_floor_id()
 	# Tell the joiner where to stand and who else is already there.
+	# Each entry carries its floor_id so the client only spawns
+	# avatars for players sharing its floor.
 	var states: Array = []
 	for other_id in _bodies:
 		if other_id == peer_id:
 			continue
 		var other: Player = _bodies[other_id]
-		states.append([other_id, other.room.room_coordinates,
+		# The joiner always lands on the primary floor — only peers
+		# sharing it may appear in its welcome state, or a same-named
+		# room id on another floor would spawn a phantom avatar.
+		if _floor_id_for_peer(other_id) != _primary_floor_id():
+			continue
+		states.append([other_id, _floor_id_for_peer(other_id),
+			other.room.room_coordinates,
 			other.grid_position, other.elevation, other.facing_direction])
 	_rpc_welcome.rpc_id(peer_id, body.room.room_coordinates,
 		body.grid_position, body.elevation, body.facing_direction, states)
 	# Everyone else learns about the new player (the joiner ignores
 	# its own id in _rpc_spawn_player).
-	_rpc_spawn_player.rpc(peer_id, body.room.room_coordinates,
+	_rpc_spawn_player.rpc(peer_id, _primary_floor_id(),
+		body.room.room_coordinates,
 		body.grid_position, body.elevation, body.facing_direction)
 	print("MultiplayerManager: peer %d joined (%d player(s) total)." % [peer_id, _bodies.size()])
 
@@ -302,6 +424,7 @@ func _on_peer_disconnected(peer_id: int) -> void:
 		return
 	_pending_peers.erase(peer_id)
 	_build_op_max.erase(peer_id)
+	_peer_floor.erase(peer_id)
 	var body: Player = _bodies.get(peer_id)
 	if body != null:
 		body.queue_free()
@@ -321,6 +444,7 @@ func _spawn_body(peer_id: int) -> Player:
 	body.network_remote = true
 	body.name = "NetBody_%d" % peer_id
 	body.grid = _world.room_world.grid
+	body.room_world = _world.room_world
 	body.block_layer = local.block_layer
 	body.room = local.room
 	body.room_size = local.room.size
@@ -335,7 +459,8 @@ func _on_body_state_changed(peer_id: int) -> void:
 	var body: Player = _bodies.get(peer_id)
 	if body == null or body.room == null:
 		return
-	_rpc_player_state.rpc(peer_id, body.room.room_coordinates,
+	_rpc_player_state.rpc(peer_id, _floor_id_for_peer(peer_id),
+		body.room.room_coordinates,
 		body.grid_position, body.elevation, body.facing_direction)
 
 # ------------------------------------------------------------------
@@ -358,6 +483,7 @@ func _on_server_disconnected() -> void:
 	_pending_peers.clear()
 	_rx_snapshots.clear()
 	_local_state_history.clear()
+	_pending_struct_ops.clear()
 	push_warning("MultiplayerManager: disconnected from server.")
 	for peer_id in _avatars.keys():
 		var avatar: Player = _avatars[peer_id]
@@ -392,6 +518,34 @@ func _is_predicted_state(room_id: Vector2i, cell: Vector2i, cell_elevation: floa
 func _room_for_id(room_id: Vector2i) -> Room:
 	return _world.room_world.get_room(room_id) if _world != null else null
 
+## Places the local player at the server-authoritative transition
+## spawn and clears every avatar — the client just changed floors, so
+## only players the server re-spawns for the new floor may appear.
+func _apply_transition_spawn(spawn: Variant) -> void:
+	for peer_id in _avatars.keys():
+		_remove_avatar(peer_id)
+	var player := _local_player()
+	if player == null or not (spawn is Dictionary):
+		return
+	var room_id := _vec2i_from_payload(spawn.get("room_id"))
+	var room := _room_for_id(room_id)
+	if room == null:
+		push_warning("MultiplayerManager: transition spawn room %s missing; kept entry placement." % room_id)
+		return
+	player.room_world = _world.room_world
+	player.room = room
+	player.block_layer = room.block_layer
+	player.room_size = room.size
+	player.place_at(_vec2i_from_payload(spawn.get("cell")),
+		float(spawn.get("elevation", 0.0)))
+
+static func _vec2i_from_payload(value: Variant) -> Vector2i:
+	if value is Vector2i:
+		return value
+	if value is Array and (value as Array).size() == 2:
+		return Vector2i(int(value[0]), int(value[1]))
+	return Vector2i.ZERO
+
 ## Reconcile the local avatar with authoritative state: the client
 ## predicts movement, so this only corrects real divergence (rejected
 ## moves, room transitions, spawn placement).
@@ -410,14 +564,19 @@ func _reconcile_local(room_id: Vector2i, cell: Vector2i, cell_elevation: float) 
 	# back now would teleport the avatar ~1-2 cells on every step.
 	if _is_predicted_state(room_id, cell, cell_elevation):
 		return
+	player.room_world = _world.room_world
 	player.room = target_room
 	player.block_layer = target_room.block_layer
 	player.room_size = target_room.size
 	player.place_at(cell, cell_elevation)
 
-func _spawn_avatar(peer_id: int, room_id: Vector2i, cell: Vector2i,
-		cell_elevation: float, face: Vector2i) -> void:
+func _spawn_avatar(peer_id: int, floor_id: StringName, room_id: Vector2i,
+		cell: Vector2i, cell_elevation: float, face: Vector2i) -> void:
 	if _avatars.has(peer_id):
+		return
+	# Only players sharing this client's floor get an avatar — room
+	# ids collide across floors, so the floor check is mandatory.
+	if _my_floor_id != &"" and floor_id != _my_floor_id:
 		return
 	var room := _room_for_id(room_id)
 	if room == null or _player_scene == null:
@@ -428,6 +587,7 @@ func _spawn_avatar(peer_id: int, room_id: Vector2i, cell: Vector2i,
 	avatar.network_remote = true
 	avatar.name = "NetAvatar_%d" % peer_id
 	avatar.grid = _world.room_world.grid
+	avatar.room_world = _world.room_world
 	avatar.block_layer = room.block_layer
 	avatar.room = room
 	avatar.room_size = room.size
@@ -466,10 +626,10 @@ func _remove_avatar(peer_id: int) -> void:
 # ------------------------------------------------------------------
 
 @rpc("authority", "call_remote", "reliable")
-func _rpc_snapshot_begin(snap_id: int, total_chunks: int) -> void:
+func _rpc_snapshot_begin(snap_id: int, total_chunks: int, purpose := "join") -> void:
 	if multiplayer.is_server():
 		return
-	_rx_snapshots[snap_id] = {"total": total_chunks, "parts": {}}
+	_rx_snapshots[snap_id] = {"total": total_chunks, "parts": {}, "purpose": purpose}
 
 @rpc("authority", "call_remote", "reliable")
 func _rpc_snapshot_chunk(snap_id: int, index: int, data: PackedByteArray) -> void:
@@ -502,17 +662,38 @@ func _rpc_snapshot_end(snap_id: int) -> void:
 	if not (parsed is Dictionary):
 		push_error("MultiplayerManager: snapshot %d is not valid JSON; world NOT synced." % snap_id)
 		return
+	var purpose := String(rx.get("purpose", "join"))
 	if not WorldSnapshot.apply(_world.floor_manager, _world.room_world,
 			_world.player, parsed):
 		push_error("MultiplayerManager: world snapshot %d failed to apply; client stays unready." % snap_id)
+		if purpose == "travel":
+			_transition_pending = false
+			if _world.player != null:
+				_world.player.local_input_locked = false
+			transition_result.emit(false, &"apply_failed")
 		return
-	world_synced = true
+	_my_floor_id = StringName(str(parsed.get("floor_id", "")))
 	_local_state_history.clear()
 	_synced_msec = Time.get_ticks_msec()
+	if purpose == "travel":
+		# Floor transition: place the local player at the
+		# server-authoritative spawn and drop every avatar — players
+		# on the old floor are no longer visible; occupants of the new
+		# floor arrive via rpc_id spawn states right after this.
+		_apply_transition_spawn(parsed.get("spawn", {}))
+		_transition_pending = false
+		if _world.player != null:
+			_world.player.local_input_locked = false
+		print("MultiplayerManager: floor transition to '%s' applied." % _my_floor_id)
+		transition_result.emit(true, &"")
+		_flush_pending_struct_ops()
+		return
+	world_synced = true
 	if _world.player != null:
 		_world.player.local_input_locked = false
 	print("MultiplayerManager: world snapshot applied; client ready.")
 	_rpc_world_ready.rpc_id(1)
+	_flush_pending_struct_ops()
 
 ## Client -> server: snapshot applied successfully; safe to spawn.
 @rpc("any_peer", "call_remote", "reliable")
@@ -533,7 +714,21 @@ func _rpc_world_ready() -> void:
 
 ## True when this peer may originate build requests.
 func can_request_build() -> bool:
-	return mode == Mode.CLIENT and _connected and world_synced
+	return mode == Mode.CLIENT and _connected and world_synced \
+		and not _transition_pending
+
+## Client -> server: request to move the local player to another
+## floor. The server validates, rebuilds only THIS peer's world, and
+## replies with a per-player snapshot — other players are unaffected.
+func request_floor_transition(floor_id: StringName) -> bool:
+	if mode != Mode.CLIENT or not _connected or not world_synced \
+			or _transition_pending or floor_id == &"" or floor_id == _my_floor_id:
+		return false
+	_transition_pending = true
+	if _world != null and _world.player != null:
+		_world.player.local_input_locked = true
+	_rpc_floor_transition_request.rpc_id(1, floor_id)
+	return true
 
 ## Client -> server: place any synchronized category. category is one
 ## of BuildOps.CATEGORIES; rotation/flip apply to furniture/carpet.
@@ -565,15 +760,21 @@ func request_build_remove(room_id: Vector2i, cell: Vector2i,
 		"anchor": anchor, "rotation": rotation, "flip": flip})
 	return true
 
-## World cells occupied by every player body plus the server's own
-## avatar — placement/removal must not target any of them.
-func _player_world_cells() -> Array:
+## World cells occupied by every player body IN THE GIVEN WORLD plus
+## the server's own avatar when it lives there — placement/removal
+## must not target any of them. Bodies on other floors share the same
+## global cell space but must not block each other.
+func _player_world_cells(world: RoomWorld) -> Array:
 	var cells: Array = []
-	for body in _bodies.values():
-		if body != null and is_instance_valid(body) and body.room != null:
-			cells.append(body.room.world_cell_coordinates(body.grid_position))
+	for peer_id in _bodies:
+		var body: Player = _bodies[peer_id]
+		if body == null or not is_instance_valid(body) or body.room == null:
+			continue
+		if _world_for_peer(peer_id) != world:
+			continue
+		cells.append(body.room.world_cell_coordinates(body.grid_position))
 	var local := _local_player()
-	if local != null and local.room != null:
+	if local != null and local.room != null and _world.room_world == world:
 		cells.append(local.room.world_cell_coordinates(local.grid_position))
 	return cells
 
@@ -596,6 +797,125 @@ func _reject_build(peer_id: int, op_id: int, reason: StringName) -> void:
 		op_id, peer_id, reason])
 
 # ------------------------------------------------------------------
+# Floor transitions (Phase C2): per-player, server-authoritative.
+# The server keeps one RoomWorld per occupied floor; a transition
+# rebinds only the requesting peer's body and sends that peer a
+# private snapshot. Nobody else's world or position changes.
+# ------------------------------------------------------------------
+
+## Client -> server: move my body to floor_id.
+@rpc("any_peer", "call_remote", "reliable")
+func _rpc_floor_transition_request(floor_id: StringName) -> void:
+	if mode != Mode.SERVER:
+		return
+	_handle_floor_transition(multiplayer.get_remote_sender_id(), floor_id)
+
+## Server -> requester only: transition refused; local input unlocks.
+@rpc("authority", "call_remote", "reliable")
+func _rpc_floor_transition_rejected(reason: StringName) -> void:
+	if multiplayer.is_server():
+		return
+	_transition_pending = false
+	if _world != null and _world.player != null:
+		_world.player.local_input_locked = false
+	transition_result.emit(false, reason)
+	# The world never changed — replay any structural broadcasts that
+	# arrived while the transition was in flight.
+	_flush_pending_struct_ops()
+
+func _reject_transition(peer_id: int, reason: StringName) -> void:
+	_rpc_floor_transition_rejected.rpc_id(peer_id, reason)
+	print("MultiplayerManager: floor transition for peer %d rejected: %s" % [
+		peer_id, reason])
+
+## Validates and applies a floor transition for one peer. Every
+## failure rejects without touching the peer's body or any world.
+func _handle_floor_transition(peer_id: int, floor_id: StringName) -> void:
+	var body: Player = _bodies.get(peer_id)
+	if body == null:
+		_reject_transition(peer_id, &"not_ready")
+		return
+	var fm := _world.floor_manager
+	if fm == null:
+		_reject_transition(peer_id, &"no_floor_manager")
+		return
+	var dest_def := fm.get_floor(floor_id)
+	if dest_def == null:
+		_reject_transition(peer_id, &"unknown_floor")
+		return
+	var current_id := _floor_id_for_peer(peer_id)
+	if current_id == floor_id:
+		_reject_transition(peer_id, &"already_there")
+		return
+	# Destination world: reuse the live instance or materialize the
+	# floor into a fresh configured RoomWorld (first visit pays the
+	# build+hydrate cost once; later visits reuse it).
+	var dest_world := fm.world_for_floor(floor_id)
+	if dest_world == null:
+		dest_world = _world.create_floor_world(floor_id)
+		if dest_world == null or not fm.materialize_runtime_floor(floor_id, dest_world):
+			if dest_world != null:
+				dest_world.queue_free()
+			_reject_transition(peer_id, &"load_failed")
+			return
+	# Persist the floor being left (rooms + connections only — player
+	# positions are not world state and bodies have no save format).
+	var out_world := _world_for_floor(current_id)
+	if out_world != null and out_world != dest_world:
+		out_world.save_room_states()
+	# Rebind the body into the destination world at the floor's
+	# authoritative spawn (entry room + spawn_position, footprint-
+	# snapped for shaped rooms).
+	var entry := dest_world.get_room(dest_def.entry_room_id)
+	if entry == null:
+		var rooms := dest_world.get_rooms()
+		entry = rooms[0] if not rooms.is_empty() else null
+	if entry == null:
+		_reject_transition(peer_id, &"no_entry_room")
+		return
+	var spawn := dest_def.spawn_position
+	if spawn.x < 0 or spawn.y < 0 or spawn.x >= entry.size.x or spawn.y >= entry.size.y:
+		spawn = Vector2i(entry.size.x >> 1, entry.size.y >> 1)
+	# Shaped rooms can have holes inside their bounding box; snap to
+	# the nearest real footprint cell (same rule as player placement).
+	if not entry.has_cell(spawn):
+		spawn = FloorManager._nearest_room_cell(entry, spawn)
+	# Set the peer's floor BEFORE place_at: it emits
+	# authoritative_state_changed, and _on_body_state_changed resolves
+	# the broadcast floor through _floor_id_for_peer.
+	_peer_floor[peer_id] = floor_id
+	if body.get_parent() != null:
+		body.get_parent().remove_child(body)
+	dest_world.entity_layer.add_child(body)
+	body.grid = dest_world.grid
+	body.room_world = dest_world
+	body.room = entry
+	body.block_layer = entry.block_layer
+	body.room_size = entry.size
+	body.place_at(spawn, body.stand_elevation_at(spawn))
+	# Remove this player's avatar everywhere, then hand the requester
+	# a private snapshot of the destination world plus spawn info and
+	# the definitions of players already there.
+	_rpc_despawn_player.rpc(peer_id)
+	var snapshot := WorldSnapshot.build(fm, dest_world, dest_def)
+	snapshot["spawn"] = {
+		"room_id": [entry.room_coordinates.x, entry.room_coordinates.y],
+		"cell": [spawn.x, spawn.y],
+		"elevation": body.elevation}
+	_send_world_snapshot(peer_id, snapshot, "travel")
+	for other_id in _bodies:
+		if other_id == peer_id or _floor_id_for_peer(other_id) != floor_id:
+			continue
+		var other: Player = _bodies[other_id]
+		if other == null or other.room == null:
+			continue
+		_rpc_spawn_player.rpc_id(peer_id, other_id, floor_id,
+			other.room.room_coordinates, other.grid_position,
+			other.elevation, other.facing_direction)
+	print("MultiplayerManager: peer %d transitioned %s -> %s." % [
+		peer_id, current_id, floor_id])
+
+# ------------------------------------------------------------------
 # Build op RPCs
 # ------------------------------------------------------------------
 
@@ -611,8 +931,14 @@ func _rpc_build_place(op_id: int, request: Dictionary) -> void:
 	if not _bodies.has(sender):
 		_reject_build(sender, op_id, &"not_ready")
 		return
-	var result := BuildOps.validate_place_any(_world.room_world,
-		_player_world_cells(), request)
+	# The op applies in the world hosting the SENDER's floor — room
+	# ids are only unique per floor.
+	var world := _world_for_peer(sender)
+	if world == null:
+		_reject_build(sender, op_id, &"unknown_floor")
+		return
+	var result := BuildOps.validate_place_any(world,
+		_player_world_cells(world), request)
 	if not bool(result.get("ok", false)):
 		_reject_build(sender, op_id, result.get("reason", &"invalid"))
 		return
@@ -622,7 +948,7 @@ func _rpc_build_place(op_id: int, request: Dictionary) -> void:
 	var object_id := StringName(str(request.get("object_id", "")))
 	var rotation := BuildOps.req_int(request.get("rotation"))
 	var flip := BuildOps.req_bool(request.get("flip"))
-	var applied: Variant = BuildOps.apply_place_any(_world.room_world, room,
+	var applied: Variant = BuildOps.apply_place_any(world, room,
 		category, cell, object_id, float(result["elevation"]), rotation, flip)
 	# Blocks/furniture return the placed node (or null); carpet/tile
 	# return bool — comparing an Object to false is a runtime error.
@@ -633,7 +959,9 @@ func _rpc_build_place(op_id: int, request: Dictionary) -> void:
 	# reproduces it locally without generating another request.
 	_rpc_build_result.rpc(op_id, true, &"", {
 		"kind": "place", "room_id": request.get("room_id", Vector2i.ZERO),
-		"cell": cell, "category": category, "object_id": object_id,
+		"floor_id": _floor_id_for_peer(sender),
+		"cell": cell, "category": category,
+		"object_id": object_id,
 		"elevation": result["elevation"], "rotation": rotation, "flip": flip})
 	print("MultiplayerManager: build op %d place %s %s @%s room %s applied." % [
 		op_id, category, object_id, cell, request.get("room_id")])
@@ -649,8 +977,12 @@ func _rpc_build_remove(op_id: int, request: Dictionary) -> void:
 	if not _bodies.has(sender):
 		_reject_build(sender, op_id, &"not_ready")
 		return
-	var result := BuildOps.validate_remove_any(_world.room_world,
-		_player_world_cells(), request)
+	var world := _world_for_peer(sender)
+	if world == null:
+		_reject_build(sender, op_id, &"unknown_floor")
+		return
+	var result := BuildOps.validate_remove_any(world,
+		_player_world_cells(world), request)
 	if not bool(result.get("ok", false)):
 		_reject_build(sender, op_id, result.get("reason", &"invalid"))
 		return
@@ -662,6 +994,7 @@ func _rpc_build_remove(op_id: int, request: Dictionary) -> void:
 	# whatever the requester claimed.
 	var payload := {
 		"kind": "remove", "room_id": request.get("room_id", Vector2i.ZERO),
+		"floor_id": _floor_id_for_peer(sender),
 		"cell": cell, "category": category,
 		"object_id": StringName(str(request.get("object_id", ""))),
 		"pos": request.get("pos", Vector2i.ZERO),
@@ -686,7 +1019,7 @@ func _rpc_build_remove(op_id: int, request: Dictionary) -> void:
 		&"tile":
 			payload["object_id"] = (top["tile"] as TileDefinition).object_id
 			payload["elev"] = float(top["elevation"])
-	if not BuildOps.apply_remove_any(_world.room_world, room, category, cell,
+	if not BuildOps.apply_remove_any(world, room, category, cell,
 			payload["object_id"], payload["pos"], payload["elev"],
 			payload["anchor"], payload["rotation"], payload["flip"]):
 		_reject_build(sender, op_id, &"apply_failed")
@@ -705,6 +1038,13 @@ func _rpc_build_result(op_id: int, accepted: bool, reason: StringName,
 		return
 	if not accepted:
 		build_result.emit(op_id, false, reason)
+		return
+	# Ops on floors this client is not visiting are irrelevant — room
+	# ids are only unique per floor, so applying them blindly could
+	# mutate the wrong replica.
+	var payload_floor := StringName(str(payload.get("floor_id", "")))
+	if payload_floor != &"" and _my_floor_id != &"" \
+			and payload_floor != _my_floor_id:
 		return
 	var room_id: Vector2i = payload.get("room_id", Vector2i.ZERO)
 	var room := _room_for_id(room_id)
@@ -729,13 +1069,525 @@ func _rpc_build_result(op_id: int, accepted: bool, reason: StringName,
 	# A failed local apply means this replica diverged from the
 	# authoritative world — surface it instead of silently drifting.
 	if applied == null or (applied is bool and applied == false):
-		push_warning("MultiplayerManager: build op %d %s failed to apply locally "
-			+ "(world may diverge until next snapshot)." % [op_id, payload.get("kind")])
+		push_warning(("MultiplayerManager: build op %d %s failed to apply locally "
+			+ "(world may diverge until next snapshot).") % [op_id, payload.get("kind")])
 	print("MultiplayerManager: build op %d %s %s @%s applied on peer %d." % [
 		op_id, payload.get("kind"), category, cell, my_peer_id])
 	build_result.emit(op_id, true, &"")
 	print("MultiplayerManager: build op %d applied locally (%s)." % [
 		op_id, payload.get("kind", "?")])
+
+# ------------------------------------------------------------------
+# Structural room ops (Phase C3): create/delete/visibility requests
+# -> server validate against the SENDER's floor world -> apply ->
+# broadcast to every peer. Clients only ever mutate replicas through
+# FloorManager.replica_* — never disk, never a re-request.
+# ------------------------------------------------------------------
+
+## Client UI feedback: emitted for every structural op result this
+## peer receives (accepted or rejected). op_id matches the request;
+## accepted payloads carry the authoritative op details (op, floor_id,
+## room_id/spec/flags) so the editor can refresh precisely.
+signal struct_result(op_id: int, accepted: bool, reason: StringName, payload: Dictionary)
+
+## Client: accepted structural broadcasts received before the world
+## snapshot finished applying (or while a transition is in flight).
+## Flushed by _flush_pending_struct_ops once _my_floor_id is final —
+## reliable ordering guarantees the snapshot itself is already applied
+## by then, so ids/specs the snapshot already carried are skipped.
+var _pending_struct_ops: Array = []
+
+## True when this peer may originate structural requests.
+func can_request_struct() -> bool:
+	return can_request_build()
+
+## Client -> server: create a room on the floor this peer occupies.
+## spec is a FloorRoomSpec serialized via FloorSaveSystem.
+## spec_to_layout_entry (the layout.json entry shape).
+func request_struct_create(spec_entry: Dictionary) -> bool:
+	if not can_request_struct() or not (spec_entry is Dictionary):
+		return false
+	_build_op_serial += 1
+	_rpc_struct_op.rpc_id(1, _build_op_serial, {
+		"op": "create", "floor_id": _my_floor_id, "spec": spec_entry})
+	return true
+
+## Client -> server: delete a room on this peer's floor.
+func request_struct_delete(room_id: Vector2i) -> bool:
+	if not can_request_struct():
+		return false
+	_build_op_serial += 1
+	_rpc_struct_op.rpc_id(1, _build_op_serial, {
+		"op": "delete", "floor_id": _my_floor_id, "room_id": room_id})
+	return true
+
+## Client -> server: set both visibility flags on a room.
+func request_struct_visibility(room_id: Vector2i,
+		show_from_outside: bool, show_outside: bool) -> bool:
+	if not can_request_struct():
+		return false
+	_build_op_serial += 1
+	_rpc_struct_op.rpc_id(1, _build_op_serial, {
+		"op": "visibility", "floor_id": _my_floor_id,
+		"room_id": room_id,
+		"show_from_outside": show_from_outside,
+		"show_outside": show_outside})
+	return true
+
+## room_id -> true for every authoritative body standing in that room
+## within the given world (plus the server's own avatar when bound
+## there). Delete validation must see ALL occupants — the local
+## "player" group only contains the server's own avatar.
+func _occupied_room_ids(world: RoomWorld) -> Dictionary:
+	var occupied := {}
+	for peer_id in _bodies:
+		var body: Player = _bodies[peer_id]
+		if body == null or not is_instance_valid(body) or body.room == null:
+			continue
+		if _world_for_peer(peer_id) != world:
+			continue
+		occupied[body.room.room_coordinates] = true
+	var local := _local_player()
+	if local != null and local.room != null and _world.room_world == world:
+		occupied[local.room.room_coordinates] = true
+	return occupied
+
+func _reject_struct(peer_id: int, op_id: int, reason: StringName) -> void:
+	_rpc_struct_result.rpc_id(peer_id, op_id, false, reason, {})
+	print("MultiplayerManager: struct op %d from peer %d rejected: %s" % [
+		op_id, peer_id, reason])
+
+## Client -> server: one structural room operation. floor_id is
+## validated against _peer_floor — the client never declares its own
+## location authoritatively.
+@rpc("any_peer", "call_remote", "reliable")
+func _rpc_struct_op(op_id: int, op: Dictionary) -> void:
+	if mode != Mode.SERVER:
+		return
+	_handle_struct_op(multiplayer.get_remote_sender_id(), op_id, op)
+
+## Server: validate + apply + broadcast one structural op. Reuses the
+## build-op dedup (_build_op_max) so op ids stay monotonic across both
+## protocols — the client shares one serial for all requests.
+func _handle_struct_op(peer_id: int, op_id: int, op: Dictionary) -> void:
+	if not _claim_build_op(peer_id, op_id):
+		_reject_struct(peer_id, op_id, &"duplicate")
+		return
+	if not _bodies.has(peer_id):
+		_reject_struct(peer_id, op_id, &"not_ready")
+		return
+	var fm := _world.floor_manager
+	if fm == null:
+		_reject_struct(peer_id, op_id, &"no_floor_manager")
+		return
+	var floor_id := StringName(str(op.get("floor_id", "")))
+	# The authoritative floor is the peer's tracked floor — a request
+	# naming any other floor is rejected outright.
+	if floor_id == &"" or floor_id != _floor_id_for_peer(peer_id):
+		_reject_struct(peer_id, op_id, &"wrong_floor")
+		return
+	var floor_def := fm.get_floor(floor_id)
+	var world := _world_for_peer(peer_id)
+	if floor_def == null or world == null:
+		_reject_struct(peer_id, op_id, &"unknown_floor")
+		return
+	var kind := StringName(str(op.get("op", "")))
+	match kind:
+		&"create":
+			_handle_struct_create(peer_id, op_id, fm, floor_def, world, op)
+		&"delete":
+			_handle_struct_delete(peer_id, op_id, fm, floor_def, world, op)
+		&"visibility":
+			_handle_struct_visibility(peer_id, op_id, fm, floor_def, op)
+		_:
+			_reject_struct(peer_id, op_id, &"unknown_op")
+
+func _handle_struct_create(peer_id: int, op_id: int, fm: FloorManager,
+		floor_def: Floor, world: RoomWorld, op: Dictionary) -> void:
+	var entry: Variant = op.get("spec")
+	if not (entry is Dictionary):
+		_reject_struct(peer_id, op_id, &"invalid_spec")
+		return
+	var spec := FloorManager.spec_from_layout_entry(entry)
+	if spec == null:
+		_reject_struct(peer_id, op_id, &"invalid_spec")
+		return
+	var result := fm._add_room_to_floor(floor_def, world, spec)
+	if not bool(result.get("ok", false)):
+		_reject_struct(peer_id, op_id,
+			StringName(str(result.get("reason", "invalid"))))
+		return
+	fm._persist_room_layout(floor_def)
+	# Broadcast the NORMALIZED spec — origin/size were rewritten to the
+	# footprint bbox, so replicas register exactly what the server did.
+	var applied_spec: FloorRoomSpec = result["spec"]
+	_rpc_struct_result.rpc(op_id, true, &"", {
+		"op": "create", "floor_id": floor_def.floor_id,
+		"requester": peer_id,
+		"spec": FloorSaveSystem.spec_to_layout_entry(applied_spec)})
+	print("MultiplayerManager: struct op %d create room %s on '%s' applied." % [
+		op_id, applied_spec.room_id, floor_def.floor_id])
+
+func _handle_struct_delete(peer_id: int, op_id: int, fm: FloorManager,
+		floor_def: Floor, world: RoomWorld, op: Dictionary) -> void:
+	var room_id := _vec2i_from_payload(op.get("room_id"))
+	var occupied := _occupied_room_ids(world)
+	var verdict := fm.can_delete_room_on_floor(floor_def.floor_id, room_id, occupied)
+	if not bool(verdict.get("allowed", false)):
+		_reject_struct(peer_id, op_id,
+			StringName(str(verdict.get("reason", "invalid"))))
+		return
+	if not fm.remove_room_from_floor(floor_def.floor_id, room_id, occupied):
+		_reject_struct(peer_id, op_id, &"apply_failed")
+		return
+	_rpc_struct_result.rpc(op_id, true, &"", {
+		"op": "delete", "floor_id": floor_def.floor_id,
+		"requester": peer_id, "room_id": room_id})
+	print("MultiplayerManager: struct op %d delete room %s on '%s' applied." % [
+		op_id, room_id, floor_def.floor_id])
+
+func _handle_struct_visibility(peer_id: int, op_id: int, fm: FloorManager,
+		floor_def: Floor, op: Dictionary) -> void:
+	var room_id := _vec2i_from_payload(op.get("room_id"))
+	var from_outside := bool(op.get("show_from_outside", true))
+	var show_outside := bool(op.get("show_outside", true))
+	if not fm.set_room_visibility_on_floor(floor_def.floor_id, room_id,
+			from_outside, show_outside):
+		_reject_struct(peer_id, op_id, &"unknown_room")
+		return
+	_rpc_struct_result.rpc(op_id, true, &"", {
+		"op": "visibility", "floor_id": floor_def.floor_id,
+		"requester": peer_id, "room_id": room_id,
+		"show_from_outside": from_outside, "show_outside": show_outside})
+	print("MultiplayerManager: struct op %d visibility %s on '%s' applied." % [
+		op_id, room_id, floor_def.floor_id])
+
+## Server -> all clients: authoritative structural outcome. accepted
+## payloads carry floor_id; clients on other floors drop them.
+@rpc("authority", "call_remote", "reliable")
+func _rpc_struct_result(op_id: int, accepted: bool, reason: StringName,
+		payload: Dictionary) -> void:
+	if multiplayer.is_server():
+		return
+	_handle_struct_result(op_id, accepted, reason, payload)
+
+## Client-side struct result handling, split from the RPC so tests can
+## drive it without an ENet peer.
+func _handle_struct_result(op_id: int, accepted: bool, reason: StringName,
+		payload: Dictionary) -> void:
+	if not accepted:
+		struct_result.emit(op_id, false, reason, {})
+		return
+	# Not ready yet (join snapshot in flight) or mid-transition: queue
+	# and let _flush_pending_struct_ops apply once _my_floor_id is
+	# final. Reliable ordering puts the snapshot ahead of this op.
+	if not world_synced or _transition_pending:
+		_pending_struct_ops.append({"op_id": op_id, "payload": payload})
+		return
+	var payload_floor := StringName(str(payload.get("floor_id", "")))
+	if payload_floor != &"" and _my_floor_id != &"" \
+			and payload_floor != _my_floor_id:
+		return
+	if _apply_struct_payload(payload):
+		struct_result.emit(op_id, true, &"", payload)
+	else:
+		push_warning(("MultiplayerManager: struct op %d %s failed to apply locally "
+			+ "(world may diverge until next snapshot).") % [
+				op_id, str(payload.get("op", "?"))])
+		struct_result.emit(op_id, true, &"diverged", payload)
+
+## Applies one accepted structural payload to the local replica via the
+## unguarded FloorManager.replica_* ops. Idempotent against snapshots:
+## a room the snapshot already carried counts as consistent, not an
+## error. Returns false only on genuine divergence.
+func _apply_struct_payload(payload: Dictionary) -> bool:
+	if _world == null or _world.floor_manager == null or _world.room_world == null:
+		return false
+	var fm: FloorManager = _world.floor_manager
+	var floor_id := StringName(str(payload.get("floor_id", _my_floor_id)))
+	var floor_def := fm.get_floor(floor_id)
+	if floor_def == null:
+		push_warning("MultiplayerManager: struct op for unknown floor '%s'." % floor_id)
+		return false
+	var world := _world.room_world
+	var room_id := _vec2i_from_payload(payload.get("room_id"))
+	match StringName(str(payload.get("op", ""))):
+		&"create":
+			var entry: Variant = payload.get("spec")
+			if not (entry is Dictionary):
+				return false
+			var spec := FloorManager.spec_from_layout_entry(entry)
+			if spec == null:
+				return false
+			# Already present (snapshot carried it): consistent.
+			if world.get_room(spec.room_id) != null \
+					and floor_def.find_room_spec(spec.room_id) != null:
+				return true
+			return fm.replica_add_room(floor_id, entry) != null
+		&"delete":
+			# Already gone (snapshot post-dates the delete): consistent.
+			if world.get_room(room_id) == null \
+					and floor_def.find_room_spec(room_id) == null:
+				return true
+			return fm.replica_remove_room(floor_id, room_id)
+		&"visibility":
+			var spec := floor_def.find_room_spec(room_id)
+			if spec == null:
+				return false
+			var from_outside := bool(payload.get("show_from_outside", true))
+			var show_outside := bool(payload.get("show_outside", true))
+			if spec.show_from_outside == from_outside \
+					and spec.show_outside == show_outside:
+				return true
+			return fm.replica_set_room_visibility(floor_id, room_id,
+				from_outside, show_outside)
+	return false
+
+## Replays queued structural broadcasts after a snapshot applied —
+## called from both the join path and the travel path. Ops for floors
+## the client does not occupy are dropped (it will get them in a later
+## snapshot if it ever travels there).
+func _flush_pending_struct_ops() -> void:
+	if _pending_struct_ops.is_empty():
+		return
+	var queued := _pending_struct_ops
+	_pending_struct_ops = []
+	for item in queued:
+		var payload: Dictionary = item.get("payload", {})
+		var payload_floor := StringName(str(payload.get("floor_id", "")))
+		if payload_floor != &"" and _my_floor_id != &"" \
+				and payload_floor != _my_floor_id:
+			continue
+		var op_id := int(item.get("op_id", 0))
+		if _apply_struct_payload(payload):
+			struct_result.emit(op_id, true, &"", payload)
+		else:
+			push_warning(("MultiplayerManager: queued struct op %d failed to apply "
+				+ "after snapshot (world may diverge).") % op_id)
+			struct_result.emit(op_id, true, &"diverged", payload)
+
+# ------------------------------------------------------------------
+# Floor ops (Phase C4): catalog-global create/delete requests ->
+# server validate -> apply -> broadcast to EVERY peer (the floor
+# catalog is not floor-scoped, so these bypass the wrong_floor check
+# that room structural ops use). Clients reconcile replicas through
+# register/unregister_floor_replica and the snapshot floor catalog —
+# never disk, never a re-request.
+# ------------------------------------------------------------------
+
+## Client UI feedback: emitted for every floor-op result this peer
+## receives. payload carries op ("floor_create"/"floor_delete"),
+## floor_id, and for creates the canonical floor_def data.
+signal floor_result(op_id: int, accepted: bool, reason: StringName, payload: Dictionary)
+
+## Client -> server: create a floor. Only the id and display name are
+## sent — the server derives the canonical definition (default room
+## layout) via FloorManager.create_floor, so clients can never inject
+## arbitrary specs.
+func request_floor_create(floor_id: StringName, display_name := "") -> bool:
+	if not can_request_struct() or floor_id == &"":
+		return false
+	_build_op_serial += 1
+	_rpc_floor_op.rpc_id(1, _build_op_serial, {
+		"op": "floor_create", "floor_id": floor_id,
+		"display_name": display_name.left(80)})
+	return true
+
+## Client -> server: delete a floor. The server rejects while any
+## peer body occupies it; there is no evacuation flow this phase.
+func request_floor_delete(floor_id: StringName) -> bool:
+	if not can_request_struct() or floor_id == &"":
+		return false
+	_build_op_serial += 1
+	_rpc_floor_op.rpc_id(1, _build_op_serial, {
+		"op": "floor_delete", "floor_id": floor_id})
+	return true
+
+func _reject_floor(peer_id: int, op_id: int, reason: StringName) -> void:
+	_rpc_floor_result.rpc_id(peer_id, op_id, false, reason, {})
+	print("MultiplayerManager: floor op %d from peer %d rejected: %s" % [
+		op_id, peer_id, reason])
+
+## Client -> server: one floor catalog operation. Unlike room struct
+## ops there is no floor scoping — the catalog is global — but the
+## same monotonic op-id dedup applies.
+@rpc("any_peer", "call_remote", "reliable")
+func _rpc_floor_op(op_id: int, op: Dictionary) -> void:
+	if mode != Mode.SERVER:
+		return
+	_handle_floor_op(multiplayer.get_remote_sender_id(), op_id, op)
+
+func _handle_floor_op(peer_id: int, op_id: int, op: Dictionary) -> void:
+	if not _claim_build_op(peer_id, op_id):
+		_reject_floor(peer_id, op_id, &"duplicate")
+		return
+	if not _bodies.has(peer_id):
+		_reject_floor(peer_id, op_id, &"not_ready")
+		return
+	var fm := _world.floor_manager
+	if fm == null:
+		_reject_floor(peer_id, op_id, &"no_floor_manager")
+		return
+	match StringName(str(op.get("op", ""))):
+		&"floor_create":
+			_handle_floor_create(peer_id, op_id, fm, op)
+		&"floor_delete":
+			_handle_floor_delete(peer_id, op_id, fm, op)
+		_:
+			_reject_floor(peer_id, op_id, &"unknown_op")
+
+func _handle_floor_create(peer_id: int, op_id: int, fm: FloorManager,
+		op: Dictionary) -> void:
+	var floor_id := StringName(str(op.get("floor_id", "")))
+	# Same id rules as FloorSaveSystem.floor_dir: empty, dot-relative,
+	# or path-hostile ids can never name a save directory.
+	if floor_id == &"" or FloorSaveSystem.floor_dir(floor_id).is_empty() \
+			or String(floor_id).length() > 64:
+		_reject_floor(peer_id, op_id, &"invalid_id")
+		return
+	if fm.has_floor(floor_id):
+		_reject_floor(peer_id, op_id, &"duplicate_floor")
+		return
+	var display_name := str(op.get("display_name", "")).strip_edges()
+	var floor_def := fm.create_floor(floor_id, display_name)
+	if floor_def == null:
+		_reject_floor(peer_id, op_id, &"invalid_floor")
+		return
+	# Broadcast the canonical definition (floor_def.json format) so
+	# every client registers the same replica — including peers that
+	# never visit the floor.
+	_rpc_floor_result.rpc(op_id, true, &"", {
+		"op": "floor_create", "floor_id": floor_id,
+		"requester": peer_id,
+		"floor_def": FloorSaveSystem.floor_definition_data(floor_def)})
+	print("MultiplayerManager: floor op %d create '%s' applied." % [op_id, floor_id])
+
+func _handle_floor_delete(peer_id: int, op_id: int, fm: FloorManager,
+		op: Dictionary) -> void:
+	var floor_id := StringName(str(op.get("floor_id", "")))
+	var floor_def := fm.get_floor(floor_id)
+	if floor_def == null:
+		_reject_floor(peer_id, op_id, &"unknown_floor")
+		return
+	var verdict := fm.can_delete_floor(floor_id)
+	if not bool(verdict.get("allowed", false)):
+		_reject_floor(peer_id, op_id,
+			StringName(str(verdict.get("reason", "invalid"))))
+		return
+	# Occupancy: any authoritative body whose tracked floor is the
+	# target rejects the delete — there is no evacuation flow.
+	for other_id in _bodies:
+		if _floor_id_for_peer(other_id) == floor_id:
+			_reject_floor(peer_id, op_id, &"occupied")
+			return
+	# Active-floor delete: switch the bound world to a fallback first
+	# (same discipline as FloorManager.delete_floor), then migrate any
+	# bodies parked in the fallback's runtime world into the bound
+	# world so no floor ever has two live RoomWorlds.
+	if fm.active_floor == floor_def:
+		var fallback: Floor = null
+		for other in fm.floors:
+			if other != floor_def:
+				fallback = other
+				break
+		if fallback == null or not fm.switch_floor(fallback.floor_id):
+			_reject_floor(peer_id, op_id, &"switch_failed")
+			return
+		_migrate_runtime_bodies_to_bound(fallback.floor_id)
+	# Non-active floors may still hold an unused runtime world —
+	# occupancy above guarantees it is empty, so teardown is safe.
+	fm.release_runtime_world(floor_id)
+	if not fm.unregister_floor(floor_id):
+		_reject_floor(peer_id, op_id, &"apply_failed")
+		return
+	var error := FloorSaveSystem.delete_floor_save(floor_id)
+	if error != OK:
+		push_warning("MultiplayerManager: floor '%s' unregistered but save removal failed (error %d)." % [
+			floor_id, error])
+	_rpc_floor_result.rpc(op_id, true, &"", {
+		"op": "floor_delete", "floor_id": floor_id,
+		"requester": peer_id})
+	print("MultiplayerManager: floor op %d delete '%s' applied." % [op_id, floor_id])
+
+## After switch_floor makes floor_id active, a runtime_worlds entry
+## for it (bodies visited earlier) is shadowed by the bound world —
+## rebind each of its bodies to the bound world's Room instances, then
+## release the orphaned world. Positions/floor are unchanged, so no
+## client notification is needed; place_at only re-broadcasts state.
+func _migrate_runtime_bodies_to_bound(floor_id: StringName) -> void:
+	var fm := _world.floor_manager
+	var runtime_world: RoomWorld = fm.runtime_worlds.get(floor_id)
+	if runtime_world == null:
+		return
+	var bound := _world.room_world
+	for peer_id in _bodies:
+		var body: Player = _bodies[peer_id]
+		if body == null or not is_instance_valid(body) or body.room == null:
+			continue
+		if _floor_id_for_peer(peer_id) != floor_id or body.room_world != runtime_world:
+			continue
+		var new_room := bound.get_room(body.room.room_coordinates)
+		if new_room == null:
+			push_warning("MultiplayerManager: cannot migrate peer %d body — room %s missing in bound world." % [
+				peer_id, body.room.room_coordinates])
+			continue
+		if body.get_parent() != null:
+			body.get_parent().remove_child(body)
+		bound.entity_layer.add_child(body)
+		body.grid = bound.grid
+		body.room_world = bound
+		body.room = new_room
+		body.block_layer = new_room.block_layer
+		body.room_size = new_room.size
+		body.place_at(body.grid_position, body.stand_elevation_at(body.grid_position))
+	fm.release_runtime_world(floor_id)
+
+## Server -> all clients: authoritative floor-op outcome. Catalog
+## ops are global — clients must NOT floor-filter these.
+@rpc("authority", "call_remote", "reliable")
+func _rpc_floor_result(op_id: int, accepted: bool, reason: StringName,
+		payload: Dictionary) -> void:
+	if multiplayer.is_server():
+		return
+	_handle_floor_result(op_id, accepted, reason, payload)
+
+## Client-side floor result handling. Applies immediately — catalog
+## state is global and idempotent, and the next snapshot's floor
+## catalog reconcile converges any residual drift.
+func _handle_floor_result(op_id: int, accepted: bool, reason: StringName,
+		payload: Dictionary) -> void:
+	if not accepted:
+		floor_result.emit(op_id, false, reason, {})
+		return
+	var applied := false
+	if _world != null and _world.floor_manager != null:
+		var fm: FloorManager = _world.floor_manager
+		match StringName(str(payload.get("op", ""))):
+			&"floor_create":
+				var floor_id := StringName(str(payload.get("floor_id", "")))
+				var def_data: Variant = payload.get("floor_def")
+				# Already registered (duplicate broadcast or the join
+				# snapshot's catalog beat it here): consistent.
+				if fm.has_floor(floor_id):
+					applied = true
+				elif def_data is Dictionary:
+					var rebuilt := fm._floor_from_saved_data(def_data)
+					applied = rebuilt != null \
+						and rebuilt.floor_id == floor_id \
+						and fm.register_floor_replica(rebuilt)
+			&"floor_delete":
+				var floor_id := StringName(str(payload.get("floor_id", "")))
+				# Already gone: consistent. unregister_floor_replica
+				# refuses the active floor — a divergence the snapshot
+				# catalog will keep flagging until resolved.
+				applied = not fm.has_floor(floor_id) \
+					or fm.unregister_floor_replica(floor_id)
+	if applied:
+		floor_result.emit(op_id, true, &"", payload)
+	else:
+		push_warning(("MultiplayerManager: floor op %d failed to apply locally "
+			+ "(catalog may diverge until next snapshot).") % op_id)
+		floor_result.emit(op_id, true, &"diverged", payload)
 
 # ------------------------------------------------------------------
 # Debug build ops for headless live tests (--build-op / legacy flags)
@@ -789,7 +1641,10 @@ func _run_debug_build_ops() -> void:
 		return
 	for i in range(_debug_ops.size()):
 		var op: Dictionary = _debug_ops[i]
-		if op.get("done", false) or now < 2000 + i * 1500:
+		# A pending transition rebuilds the world; ops fired mid-flight
+		# would target rooms that no longer exist. Wait it out.
+		if op.get("done", false) or _transition_pending \
+				or now < 2000 + i * 1500:
 			continue
 		op["done"] = true
 		if String(op.get("kind")) == "place":
@@ -828,6 +1683,116 @@ func _debug_remove_request(room: Room, cell: Vector2i, category: StringName,
 				Vector2i.ZERO, float(top["elevation"]))
 	return false
 
+## Parses --struct-op specs:
+## "create:rx,ry:ox,oy:w,h" | "delete:rx,ry" | "vis:rx,ry:from,out".
+func _parse_struct_ops(specs: Variant) -> Array:
+	var ops: Array = []
+	for spec in specs if specs is Array else []:
+		var text := String(spec)
+		var parts := text.split(":")
+		var kind := String(parts[0]) if parts.size() > 0 else ""
+		if parts.size() < 2:
+			push_warning("MultiplayerManager: ignoring malformed --struct-op '%s'." % spec)
+			continue
+		var coords := parts[1].split(",")
+		if coords.size() != 2 or not coords[0].is_valid_int() \
+				or not coords[1].is_valid_int():
+			push_warning("MultiplayerManager: ignoring malformed --struct-op '%s'." % spec)
+			continue
+		var room_id := Vector2i(int(coords[0]), int(coords[1]))
+		match kind:
+			"create":
+				var rect := parts[2].split(",") if parts.size() > 2 else PackedStringArray()
+				var wh := parts[3].split(",") if parts.size() > 3 else PackedStringArray()
+				if rect.size() != 2 or wh.size() != 2 \
+						or not rect[0].is_valid_int() or not rect[1].is_valid_int() \
+						or not wh[0].is_valid_int() or not wh[1].is_valid_int():
+					push_warning("MultiplayerManager: ignoring --struct-op '%s' (bad rect)." % spec)
+					continue
+				var room_spec := FloorRoomSpec.new()
+				room_spec.room_id = room_id
+				room_spec.global_origin = Vector2i(int(rect[0]), int(rect[1]))
+				room_spec.size = Vector2i(int(wh[0]), int(wh[1]))
+				ops.append({"kind": "create", "spec": room_spec, "done": false})
+			"delete":
+				ops.append({"kind": "delete", "room_id": room_id, "done": false})
+			"vis":
+				var flags := parts[2].split(",") if parts.size() > 2 else PackedStringArray()
+				if flags.size() != 2:
+					push_warning("MultiplayerManager: ignoring --struct-op '%s' (bad flags)." % spec)
+					continue
+				ops.append({"kind": "vis", "room_id": room_id,
+					"from": flags[0] == "1", "out": flags[1] == "1", "done": false})
+			_:
+				push_warning("MultiplayerManager: ignoring --struct-op '%s' (bad kind)." % spec)
+	return ops
+
+## Fires queued --struct-op requests once each after world sync,
+## staggered like the build ops and paused during transitions.
+func _run_debug_struct_ops() -> void:
+	if mode != Mode.CLIENT or not world_synced or _synced_msec < 0:
+		return
+	var now := Time.get_ticks_msec() - _synced_msec
+	for i in range(_debug_struct_ops.size()):
+		var op: Dictionary = _debug_struct_ops[i]
+		if op.get("done", false) or _transition_pending \
+				or now < 2000 + i * 1500:
+			continue
+		op["done"] = true
+		var ok := false
+		match String(op.get("kind")):
+			"create":
+				ok = request_struct_create(
+					FloorSaveSystem.spec_to_layout_entry(op["spec"]))
+			"delete":
+				ok = request_struct_delete(op["room_id"])
+			"vis":
+				ok = request_struct_visibility(op["room_id"],
+					bool(op.get("from", true)), bool(op.get("out", true)))
+		print("MultiplayerManager: debug struct op %s -> %s" % [op.get("kind"), ok])
+
+## Parses --floor-op specs:
+## "create:floor_id[:display name]" | "delete:floor_id".
+func _parse_floor_ops(specs: Variant) -> Array:
+	var ops: Array = []
+	for spec in specs if specs is Array else []:
+		var parts := String(spec).split(":")
+		var kind := String(parts[0]) if parts.size() > 0 else ""
+		if parts.size() < 2 or parts[1].is_empty():
+			push_warning("MultiplayerManager: ignoring malformed --floor-op '%s'." % spec)
+			continue
+		match kind:
+			"create":
+				ops.append({"kind": "create", "floor_id": StringName(parts[1]),
+					"display_name": ":".join(parts.slice(2)), "done": false})
+			"delete":
+				ops.append({"kind": "delete", "floor_id": StringName(parts[1]),
+					"done": false})
+			_:
+				push_warning("MultiplayerManager: ignoring --floor-op '%s' (bad kind)." % spec)
+	return ops
+
+## Fires queued --floor-op requests once each after world sync,
+## staggered like the other debug ops and paused during transitions.
+func _run_debug_floor_ops() -> void:
+	if mode != Mode.CLIENT or not world_synced or _synced_msec < 0:
+		return
+	var now := Time.get_ticks_msec() - _synced_msec
+	for i in range(_debug_floor_ops.size()):
+		var op: Dictionary = _debug_floor_ops[i]
+		if op.get("done", false) or _transition_pending \
+				or now < 2000 + i * 1500:
+			continue
+		op["done"] = true
+		var ok := false
+		match String(op.get("kind")):
+			"create":
+				ok = request_floor_create(op["floor_id"],
+					String(op.get("display_name", "")))
+			"delete":
+				ok = request_floor_delete(op["floor_id"])
+		print("MultiplayerManager: debug floor op %s -> %s" % [op.get("kind"), ok])
+
 # ------------------------------------------------------------------
 # RPCs — path-stable: always /root/<Main>/WorldBootstrap/MultiplayerManager
 # ------------------------------------------------------------------
@@ -852,28 +1817,36 @@ func _rpc_welcome(room_id: Vector2i, cell: Vector2i, cell_elevation: float,
 		return
 	_reconcile_local(room_id, cell, cell_elevation)
 	for entry in states:
-		_spawn_avatar(int(entry[0]), entry[1], entry[2], entry[3], entry[4])
+		# entries: [peer_id, floor_id, room_id, cell, elev, face]
+		if entry is Array and entry.size() >= 6:
+			_spawn_avatar(int(entry[0]), StringName(str(entry[1])), entry[2],
+				entry[3], entry[4], entry[5])
 
-## Server -> all clients: a player entered the world.
+## Server -> all clients: a player entered the world (or a floor the
+## recipient just transitioned to — sent rpc_id in that case).
 @rpc("authority", "call_remote", "reliable")
-func _rpc_spawn_player(peer_id: int, room_id: Vector2i, cell: Vector2i,
-		cell_elevation: float, face: Vector2i) -> void:
+func _rpc_spawn_player(peer_id: int, floor_id: StringName, room_id: Vector2i,
+		cell: Vector2i, cell_elevation: float, face: Vector2i) -> void:
 	if multiplayer.is_server() or peer_id == my_peer_id:
 		return
-	_spawn_avatar(peer_id, room_id, cell, cell_elevation, face)
+	_spawn_avatar(peer_id, floor_id, room_id, cell, cell_elevation, face)
 
 ## Server -> all clients: authoritative grid state for a peer.
 @rpc("authority", "call_remote", "reliable")
-func _rpc_player_state(peer_id: int, room_id: Vector2i, cell: Vector2i,
-		cell_elevation: float, face: Vector2i) -> void:
+func _rpc_player_state(peer_id: int, floor_id: StringName, room_id: Vector2i,
+		cell: Vector2i, cell_elevation: float, face: Vector2i) -> void:
 	if multiplayer.is_server():
+		return
+	# Stale echoes from a floor this client already left must not move
+	# the local avatar or mutate same-named rooms on the new floor.
+	if _my_floor_id != &"" and floor_id != _my_floor_id:
 		return
 	if peer_id == my_peer_id:
 		_reconcile_local(room_id, cell, cell_elevation)
 		return
 	var avatar: Player = _avatars.get(peer_id)
 	if avatar == null:
-		_spawn_avatar(peer_id, room_id, cell, cell_elevation, face)
+		_spawn_avatar(peer_id, floor_id, room_id, cell, cell_elevation, face)
 		return
 	avatar.network_apply_state(_room_for_id(room_id), cell, cell_elevation, face)
 

@@ -207,6 +207,13 @@ var _room_panel_delete: Button
 var _room_delete_armed := false
 var _room_panel_show_from_outside: CheckBox
 var _room_panel_show_outside: CheckBox
+## Multiplayer client: cached manager + count of structural requests
+## awaiting a server result (create/delete/visibility).
+var _struct_mgr: MultiplayerManager
+var _struct_pending := 0
+## Room id of the create request awaiting a server result — used to
+## recenter on the replica room once the broadcast applies it.
+var _pending_create_room_id := Vector2i(-1, -1)
 var _room_panel_room: Room = null
 
 var _room_world: RoomWorld
@@ -640,6 +647,9 @@ func _toggle_create_tool() -> void:
 		tool = Tool.NONE
 		_cancel_pending()
 		return
+	if _structural_readonly():
+		_set_notice("Floor edits are sent to the server for approval.")
+		# Clients may still draw selections — confirming sends a request.
 	tool = Tool.CREATE_ROOM
 	# The selection preview is drawn by the editor canvas, which is only
 	# visible in GRID view — switch so the drag is actually visible.
@@ -876,12 +886,22 @@ func _open_room_panel(room: Room) -> void:
 	_room_panel_contents.text = "Contents: " + ("empty" if parts.is_empty() else ", ".join(parts))
 	_room_panel_status.text = ""
 	var floor_manager := _floor_manager()
+	var readonly := _structural_readonly()
 	var verdict := {"allowed": false, "reason": "No active floor."}
 	if floor_manager != null:
+		# On a client this verdict cannot see remote occupants — the
+		# server re-validates occupancy authoritatively on the request.
 		verdict = floor_manager.can_delete_room(room.room_coordinates)
 	_room_panel_delete.disabled = not bool(verdict.get("allowed", false))
-	if not bool(verdict.get("allowed", false)):
+	_room_panel_show_from_outside.disabled = false
+	_room_panel_show_outside.disabled = false
+	if readonly:
+		_room_panel_status.text = "Multiplayer: edits are requested from the server." \
+			+ ("" if bool(verdict.get("allowed", false)) else " Cannot delete: %s" % str(verdict.get("reason", "")))
+	elif not bool(verdict.get("allowed", false)):
 		_room_panel_status.text = "Cannot delete: %s" % str(verdict.get("reason", ""))
+	else:
+		_room_panel_status.text = ""
 	# Reflect the room's current options; setting button_pressed does
 	# not emit toggled, so this never retriggers the handler.
 	_room_panel_show_from_outside.set_pressed_no_signal(room.show_from_outside)
@@ -894,6 +914,17 @@ func _open_room_panel(room: Room) -> void:
 func _on_room_option_toggled(_pressed: bool = false) -> void:
 	var room := _room_panel_room
 	if room == null or not is_instance_valid(room):
+		return
+	if _structural_readonly():
+		# Clients never mutate the replica — the request carries both
+		# flag values; the authoritative broadcast applies them (or the
+		# rejection snaps the checkboxes back in _on_struct_result).
+		var mgr := _struct_manager()
+		if mgr != null and mgr.request_struct_visibility(room.room_coordinates,
+				_room_panel_show_from_outside.button_pressed,
+				_room_panel_show_outside.button_pressed):
+			_struct_pending += 1
+			_room_panel_status.text = "Visibility change requested…"
 		return
 	room.show_from_outside = _room_panel_show_from_outside.button_pressed
 	room.show_outside = _room_panel_show_outside.button_pressed
@@ -908,9 +939,7 @@ func _on_room_option_toggled(_pressed: bool = false) -> void:
 		_room_world.visuals.begin_transition()
 
 func _on_room_delete() -> void:
-	var floor_manager := _floor_manager()
-	if floor_manager == null or _room_panel_room == null \
-			or not is_instance_valid(_room_panel_room):
+	if _room_panel_room == null or not is_instance_valid(_room_panel_room):
 		_close_room_panel()
 		return
 	var room_id: Vector2i = _room_panel_room.room_coordinates
@@ -921,6 +950,20 @@ func _on_room_delete() -> void:
 		return
 	_room_delete_armed = false
 	_room_panel_delete.text = "Delete"
+	if _structural_readonly():
+		# Clients request the delete; the broadcast removes the room
+		# from the replica and _on_struct_result closes this panel.
+		var mgr := _struct_manager()
+		if mgr != null and mgr.request_struct_delete(room_id):
+			_struct_pending += 1
+			_room_panel_status.text = "Delete requested — waiting for server…"
+		else:
+			_room_panel_status.text = "Not connected — cannot request delete."
+		return
+	var floor_manager := _floor_manager()
+	if floor_manager == null:
+		_close_room_panel()
+		return
 	if floor_manager.remove_room_from_active_floor(room_id):
 		_set_notice("Room %s deleted." % _id_label(room_id))
 		_room_panel_room = null
@@ -970,6 +1013,19 @@ func _on_panel_create() -> void:
 	spec.size = bounds.size
 	spec.show_from_outside = _panel_show_from_outside.button_pressed
 	spec.show_outside = _panel_show_outside.button_pressed
+	if _structural_readonly():
+		# Clients send the spec; the server validates and broadcasts.
+		# Sections/panel stay open until the result arrives — no local
+		# floor manager needed, the request only carries the entry.
+		var mgr := _struct_manager()
+		if mgr != null and mgr.request_struct_create(
+				FloorSaveSystem.spec_to_layout_entry(spec)):
+			_struct_pending += 1
+			_pending_create_room_id = room_id
+			_panel_status.text = "Creation requested — waiting for server…"
+		else:
+			_panel_status.text = "Not connected — cannot request creation."
+		return
 	var floor_manager := _floor_manager()
 	if floor_manager == null:
 		_panel_status.text = "No active floor — room creation requires one."
@@ -994,6 +1050,84 @@ func _floor_manager() -> FloorManager:
 	if world != null:
 		return world.floor_manager
 	return null
+
+## True while structural edits must be refused: the local peer is a
+## multiplayer client whose world is rebuilt only by authoritative
+## snapshots/ops. Inspection (grid, room panels) stays available, and
+## edits are sent to the server as requests rather than applied locally.
+func _structural_readonly() -> bool:
+	return is_inside_tree() and MultiplayerManager.is_client(get_tree())
+
+## The shared MultiplayerManager (group "multiplayer_manager"), cached
+## with a one-time struct_result hookup for request feedback.
+func _struct_manager() -> MultiplayerManager:
+	if _struct_mgr != null and is_instance_valid(_struct_mgr):
+		return _struct_mgr
+	_struct_mgr = get_tree().get_first_node_in_group(&"multiplayer_manager") as MultiplayerManager
+	if _struct_mgr != null \
+			and not _struct_mgr.struct_result.is_connected(_on_struct_result):
+		_struct_mgr.struct_result.connect(_on_struct_result)
+	return _struct_mgr
+
+## Server verdict for a structural op — rejections only ever reach the
+## requester, but ACCEPTED broadcasts reach every client on the floor
+## (payload.requester distinguishes whose request it was). Every client
+## refreshes its panels; only the requester counts pending/creates.
+## Accepted payloads arrive AFTER the replica already applied the
+## change, so the UI only needs to refresh/close panels and report.
+func _on_struct_result(_op_id: int, accepted: bool, reason: StringName,
+		payload: Dictionary) -> void:
+	var mine := accepted and _struct_mgr != null \
+		and int(payload.get("requester", 0)) == _struct_mgr.my_peer_id
+	if not accepted or mine:
+		if _struct_pending > 0:
+			_struct_pending -= 1
+	if not accepted:
+		_set_notice("Structural change rejected: %s" % reason)
+		_sync_room_panel_flags()
+		return
+	match StringName(str(payload.get("op", ""))):
+		&"create":
+			var room_id := Vector2i(-1, -1)
+			var entry: Variant = payload.get("spec")
+			if entry is Dictionary:
+				var spec := FloorManager.spec_from_layout_entry(entry)
+				if spec != null:
+					room_id = spec.room_id
+			if mine:
+				if room_id.x < 0:
+					room_id = _pending_create_room_id
+				_pending_create_room_id = Vector2i(-1, -1)
+				_pending_sections.clear()
+				_close_panel()
+			_set_notice("Room created: %s" % _id_label(room_id))
+			# Recenter on the new replica room like the local path does.
+			if mine and _room_world != null and _camera != null:
+				var room := _room_world.get_room(room_id)
+				if room != null:
+					var bounds := room.global_bounds()
+					var center := _grid.grid_to_screen_position(
+						Vector2(bounds.position) + Vector2(bounds.size) * 0.5, 0.0)
+					_camera.focus_on(center)
+		&"delete":
+			if _room_panel_room != null and not is_instance_valid(_room_panel_room):
+				_room_panel_room = null
+				_close_room_panel()
+			_set_notice("Room deleted.")
+		&"visibility":
+			_sync_room_panel_flags()
+			_set_notice("Visibility updated.")
+		_:
+			_set_notice("Structural change applied: %s" % str(payload.get("op", "?")))
+
+## Re-syncs the room panel checkboxes with the replica's authoritative
+## flags — called after visibility results (accepted or rejected).
+func _sync_room_panel_flags() -> void:
+	var room := _room_panel_room
+	if room == null or not is_instance_valid(room):
+		return
+	_room_panel_show_from_outside.set_pressed_no_signal(room.show_from_outside)
+	_room_panel_show_outside.set_pressed_no_signal(room.show_outside)
 
 func _room_id_in_use(room_id: Vector2i) -> bool:
 	if _room_world != null and _room_world.has_room(room_id):
@@ -1095,6 +1229,10 @@ func _update_hud() -> void:
 				lines.append("Press [X] to place it, RMB/Esc to cancel")
 	else:
 		lines.append("[C] create room tool")
+	if _structural_readonly():
+		lines.append("MULTIPLAYER — edits are server-authoritative")
+		if _struct_pending > 0:
+			lines.append("%d structural request(s) pending…" % _struct_pending)
 	if cursor_cell_valid:
 		lines.append("Cell: (%d, %d)" % [cursor_cell.x, cursor_cell.y])
 	if _notice != "" and Time.get_ticks_msec() < _notice_until_ms:

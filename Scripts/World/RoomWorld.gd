@@ -597,6 +597,46 @@ func _load_all_rooms() -> void:
 	_apply_saved_player_state()
 	print("RoomWorld loaded %d room(s) from '%s'." % [loaded, effective_save_directory()])
 
+## Room contents + connection graph WITHOUT player state. Used for
+## secondary runtime worlds (multiplayer floor instances): the local
+## "player"-group node does not live in those worlds, so the
+## player_state.json read/write in load_all_rooms/save_all_rooms would
+## target the wrong floor's save data.
+func load_room_states() -> void:
+	_with_save_dir(func() -> void:
+		_load_room_states())
+
+func _load_room_states() -> void:
+	_hydrated_rooms.clear()
+	for room in registry.get_rooms():
+		ensure_room_loaded(room)
+	RoomSaveSystem.load_connections(self)
+	neighborhood.invalidate()
+	visuals.begin_transition()
+	visuals.refresh_connection_markers()
+	print("RoomWorld loaded room states from '%s'." % effective_save_directory())
+
+func save_room_states() -> bool:
+	return bool(_with_save_dir(func() -> bool:
+		return _save_room_states()))
+
+func _save_room_states() -> bool:
+	var ok := true
+	var saved := 0
+	for room in registry.get_rooms():
+		var error := save_room_state(room)
+		if error == OK:
+			saved += 1
+		else:
+			ok = false
+			push_error("RoomWorld failed to save room %s (error %d)." % [room.room_coordinates, error])
+	var connection_error := RoomSaveSystem.save_connections(self)
+	if connection_error != OK:
+		ok = false
+		push_error("RoomWorld failed to save room connections (error %d)." % connection_error)
+	print("RoomWorld saved %d room state(s) to '%s'." % [saved, effective_save_directory()])
+	return ok
+
 ## Public wrapper for _apply_saved_player_state: used when the player
 ## node is spawned after load_all_rooms already ran (floor-first boot).
 ## Goes through _with_save_dir so it reads the floor-scoped directory.
@@ -618,6 +658,7 @@ func _apply_saved_player_state() -> void:
 	var saved_cell: Vector2i = state["position"]
 	if saved_cell.x < 0 or saved_cell.y < 0 or saved_cell.x >= room.size.x or saved_cell.y >= room.size.y:
 		saved_cell = Vector2i(room.size.x >> 1, room.size.y >> 1)
+	player.room_world = self
 	player.room = room
 	player.block_layer = room.block_layer
 	player.room_size = room.size

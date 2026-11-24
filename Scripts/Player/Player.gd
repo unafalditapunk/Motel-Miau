@@ -4,6 +4,12 @@ extends CharacterBody2D
 @export var grid: IsometricGrid
 @export var block_layer: BlockLayer
 @export var room: Room
+## The RoomWorld this player belongs to. Multiplayer servers host one
+## RoomWorld per occupied floor, so the "room_worlds" group lookup is
+## ambiguous — every bind site (spawn, floor transition, snapshot
+## apply, avatar spawn) must set this explicitly. Null falls back to
+## the group lookup for tests and legacy single-world setups.
+var room_world: RoomWorld
 @export var room_size := Vector2i(10, 10)
 @export var grid_position := Vector2i.ZERO
 @export var elevation := 0.0
@@ -192,6 +198,8 @@ func _inside_room_bounds(cell: Vector2i) -> bool:
 	return cell.x >= 0 and cell.y >= 0 and cell.x < room_size.x and cell.y < room_size.y
 
 func _room_world() -> RoomWorld:
+	if room_world != null and is_instance_valid(room_world):
+		return room_world
 	return get_tree().get_first_node_in_group(&"room_worlds") as RoomWorld
 
 func _room_world_cell(local_cell: Vector2i) -> Vector2i:
@@ -220,27 +228,27 @@ func evaluate_transition(direction: Vector2i) -> Dictionary:
 		result["reason"] = &"inside room"
 		return result
 	result["attempted"] = true
-	var room_world := _room_world()
-	if room_world == null:
+	var world := _room_world()
+	if world == null:
 		result["reason"] = &"no room world"
 		return result
 	# An explicit room connection covering this exit cell takes precedence
 	# over geometric adjacency; its paired entry defines the destination.
 	var dest_room: Room = null
 	var dest_local := Vector2i.ZERO
-	var exit := room_world.find_room_exit(room, grid_position, direction)
+	var exit := world.find_room_exit(room, grid_position, direction)
 	if not exit.is_empty():
-		dest_room = room_world.get_room(exit["room_id"]) as Room
+		dest_room = world.get_room(exit["room_id"]) as Room
 		dest_local = exit["cell"]
 		if dest_room == null:
 			result["reason"] = &"connection destination missing"
 			return result
 	else:
-		if room_world.require_explicit_connections:
+		if world.require_explicit_connections:
 			result["reason"] = &"no connection"
 			return result
 		var world_cell := _room_world_cell(grid_position) + direction
-		dest_room = room_world.get_room_at_world_cell(world_cell) as Room
+		dest_room = world.get_room_at_world_cell(world_cell) as Room
 		if dest_room == null or dest_room == room:
 			result["reason"] = &"no room beyond boundary"
 			return result
@@ -248,7 +256,7 @@ func evaluate_transition(direction: Vector2i) -> Dictionary:
 		if not dest_room.has_footprint_cell(dest_local):
 			result["reason"] = &"outside destination room"
 			return result
-	room_world.ensure_room_loaded(dest_room)
+	world.ensure_room_loaded(dest_room)
 	var surface := 0.0
 	var dest_layer := dest_room.block_layer
 	if dest_layer != null:
@@ -269,8 +277,8 @@ func _start_room_transition(direction: Vector2i) -> bool:
 	var info := evaluate_transition(direction)
 	if not bool(info.get("valid", false)):
 		return false
-	var room_world := _room_world()
-	var dest_room := room_world.get_room(info["room_coordinates"]) as Room
+	var world := _room_world()
+	var dest_room := world.get_room(info["room_coordinates"]) as Room
 	if dest_room == null:
 		return false
 	_set_facing(direction)
@@ -283,8 +291,8 @@ func _start_room_transition(direction: Vector2i) -> bool:
 	room_size = dest_room.size
 	grid_position = info["local_cell"]
 	elevation = float(info["surface_elevation"])
-	room_world.set_primary_room(dest_room.room_coordinates)
-	room_world.save_room_state(previous_room)
+	world.set_primary_room(dest_room.room_coordinates)
+	world.save_room_state(previous_room)
 	var to_screen := _screen_position_for_cell(grid_position, elevation)
 	authoritative_state_changed.emit()
 	return _play_move(from_screen, to_screen, previous_elevation, elevation)
@@ -294,16 +302,16 @@ func _start_room_transition(direction: Vector2i) -> bool:
 ## false — leaving the player in place — when the destination is missing,
 ## out of bounds, or blocked.
 func _try_connection_transition(entry: Dictionary, from_screen: Vector2, from_elevation: float) -> bool:
-	var room_world := _room_world()
-	if room_world == null or room == null:
+	var world := _room_world()
+	if world == null or room == null:
 		return false
-	var dest_room := room_world.get_room(entry["room_id"]) as Room
+	var dest_room := world.get_room(entry["room_id"]) as Room
 	if dest_room == null:
 		return false
 	var dest_local: Vector2i = entry["cell"]
 	if not dest_room.has_footprint_cell(dest_local):
 		return false
-	room_world.ensure_room_loaded(dest_room)
+	world.ensure_room_loaded(dest_room)
 	var surface := 0.0
 	var dest_layer := dest_room.block_layer
 	if dest_layer != null:
@@ -319,8 +327,8 @@ func _try_connection_transition(entry: Dictionary, from_screen: Vector2, from_el
 	room_size = dest_room.size
 	grid_position = dest_local
 	elevation = surface
-	room_world.set_primary_room(dest_room.room_coordinates)
-	room_world.save_room_state(previous_room)
+	world.set_primary_room(dest_room.room_coordinates)
+	world.save_room_state(previous_room)
 	var to_screen := _screen_position_for_cell(grid_position, elevation)
 	authoritative_state_changed.emit()
 	return _play_move(from_screen, to_screen, previous_elevation, elevation)
@@ -346,9 +354,9 @@ func _start_move(direction: Vector2i) -> bool:
 	elevation = target_elevation
 	# Interactive room connections trigger on entering their source cell.
 	# If the transition fails validation the player simply stays on the cell.
-	var room_world := _room_world()
-	if room_world != null and room != null:
-		var entry := room_world.find_interactive_entry(room.room_coordinates, target)
+	var world := _room_world()
+	if world != null and room != null:
+		var entry := world.find_interactive_entry(room.room_coordinates, target)
 		if not entry.is_empty() and _try_connection_transition(entry, from_screen, from_elevation):
 			return true
 	var to_screen := _screen_position_for_cell(target, target_elevation)
