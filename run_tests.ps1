@@ -43,7 +43,8 @@ $Tests = @(
     "StructuralGuardSmokeTest",
     "FloorTransitionSmokeTest",
     "StructuralOpsSmokeTest",
-    "FloorOpsSmokeTest"
+    "FloorOpsSmokeTest",
+    "ServerPersistenceSmokeTest"
 )
 
 if ($Filter -ne "") {

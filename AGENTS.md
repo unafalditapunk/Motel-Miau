@@ -29,10 +29,38 @@ FloorPersistenceSmokeTest, FloorPanelSmokeTest,
 FloorManagementSmokeTest, CreationModeSmokeTest,
 WorldSnapshotSmokeTest, BuildOpsSmokeTest,
 StructuralGuardSmokeTest, FloorTransitionSmokeTest,
-StructuralOpsSmokeTest, FloorOpsSmokeTest. Each prints
-`<NAME>_SMOKE: OK`. Tests that touch the filesystem redirect
-`RoomSaveSystem.save_dir` to `user://smoke_saves/<test>` so they never
-write to the real `user://saves`.
+StructuralOpsSmokeTest, FloorOpsSmokeTest, ServerPersistenceSmokeTest.
+Each prints `<NAME>_SMOKE: OK`. Tests that touch the filesystem redirect
+`RoomSaveSystem.save_dir`/`FloorSaveSystem.save_root` to a
+`user://smoke_*` scratch dir so they never write to the real saves.
+
+## Multiplayer quick start
+
+Multiplayer exists only when launch args request it (everything after
+`--` is a user arg). Dedicated server:
+
+```
+Godot --path <project> -- --server [--port=7777] [--saves=<dir>]
+      [--autosave=60] [--shutdown-after=N]
+```
+
+Clients (repeatable, any number):
+
+```
+Godot --path <project> -- --client[=IP] [--port=N] [--saves=<dir>]
+```
+
+`--saves=<dir>` redirects `FloorSaveSystem.save_root` per instance —
+use it to isolate test saves from the real `user://floors`. Useful
+debug args: `--autowalk` (headless player pacing), `--dump-world=N`
+(WORLD_DUMP after N s — diff server vs client output to verify
+replication), `--travel=<floor_id>` (repeatable), `--floor-op=
+create:id[:name]|delete:id`, `--build-op=place:x,y:cat:id|remove:x,y`,
+`--struct-op=create:rx,ry:ox,oy:w,h|delete:rx,ry|vis:rx,ry:a,b`.
+In-game: F7 floor panel (create/delete/enter floors — clients send
+requests to the server), F3 debug HUD. Phase status and architecture
+details: `MULTIPLAYER_STATUS.md`; deep notes in the multiplayer
+bullets below.
 
 ## World architecture
 
@@ -379,6 +407,35 @@ write to the real `user://saves`.
   signal refreshes the list/status. `--floor-op=create:id[:name]` /
   `delete:id` (repeatable) and repeatable `--travel=` fire headless
   after sync. FloorOpsSmokeTest covers the C4 matrix.
+- Authoritative persistence (Phase D): the dedicated server is the
+  only persistence owner — clients never write floor saves. Dirty
+  tracking is floor-scoped: `FloorManager._dirty_floors` maps
+  floor_id -> true, fed by `mark_floor_dirty(floor_id)` called from
+  every mutation core (content changes via `_on_world_content_changed`
+  attributed through the `_world_floor` world->floor map, struct ops,
+  visibility, room create/delete, floor create). `_persist_paused`
+  suppresses marking during materialize/hydrate so loading never
+  dirties; `mark_floor_dirty` no-ops when `structural_edits_readonly`
+  so replica applies stay clean. `save_floor_state(id)` persists ONE
+  floor through the existing format — `world_for_floor` resolves the
+  bound world OR the `runtime_worlds` entry, `save_room_states`
+  (rooms+connections, never player_state.json) then layout.json then
+  the manifest as commit marker; floors with no materialized world
+  still get layout+manifest (created-but-unvisited floors). Failed
+  saves keep the floor dirty. `save_all_dirty()` returns
+  {saved, failed} and prunes unregistered ids. Autosave:
+  `MultiplayerManager._run_autosave` fires every `_autosave_interval`
+  s (`--autosave=`, default 60, 0 disables) on the dedicated server —
+  synchronous, dirty-only, mid-save mutations simply re-dirty.
+  Shutdown: `WorldBootstrap._exit_tree`/`WM_CLOSE_REQUEST` call
+  `_net_manager.shutdown_save()` for dedicated servers (sets
+  `_shutting_down`, which makes `_handle_floor_op`,
+  `_handle_struct_op`, `_handle_floor_transition`, `_rpc_build_place`
+  and `_rpc_build_remove` reject/ignore new mutations); single-player
+  keeps `save_game()`. `save_game()` on a dedicated server delegates
+  to `save_all_dirty`. Debug: `--autosave=N`, `--shutdown-after=N`
+  (quits after N s so shutdown-save is testable headless).
+  ServerPersistenceSmokeTest covers the D matrix.
 - Neighborhood: the visible set is the primary room plus rooms within
   `spatial_neighborhood_depth` BFS hops of bounds adjacency (a room's
   `global_bounds()` grown by `neighborhood_padding` world cells must
@@ -387,11 +444,13 @@ write to the real `user://saves`.
   `get_visible_room_coordinates()`, `get_spatial_neighbors()`,
   `spatial_distance_from_primary()`, `get_connected_room_ids()`, and
   `connection_distance_from_primary()` expose it; F3 shows counts.
-- Multiplayer prototype: `MultiplayerManager` (`Scripts/Net/`, Node
+- Multiplayer (Phases A–D complete — see MULTIPLAYER_STATUS.md):
+  `MultiplayerManager` (`Scripts/Net/`, Node
   child of WorldBootstrap named "MultiplayerManager" — the stable RPC
   path) exists ONLY when launch args request it; no args = pure
   single-player. `-- --server` runs a dedicated ENet server (peer 1,
-  headless-friendly, skips save-on-exit), `-- --client[=IP] --port=N`
+  headless-friendly; on a normal exit it saves every dirty floor —
+  Phase D below), `-- --client[=IP] --port=N`
   connects (default 127.0.0.1:7777), `--autowalk` paces the local
   player for headless tests. The server owns one authoritative Player
   body per peer (`network_remote=true`: no "player" group membership,
@@ -488,8 +547,8 @@ write to the real `user://saves`.
   every materialized floor world plus a `peer_floors` map; it now
   lists explicit tile overrides and carpet anchors per room) and
   `--travel=<floor_id>` (repeatable, in order) requests client floor
-  transitions once synced. Known limits:
-  server
-  persistence/autosave deferred (Phase D) — the dedicated server
-  still skips save-on-exit; movement has no interpolation; no
-  auth/encryption.
+  transitions once synced; `--autosave=N` / `--shutdown-after=N`
+  drive the Phase D server persistence paths headless. Known limits:
+  an abrupt kill/power loss bypasses the shutdown save — autosave
+  bounds the loss; saves are synchronous on the main thread; no
+  movement interpolation; no auth/encryption.

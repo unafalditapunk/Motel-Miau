@@ -30,8 +30,17 @@ var floors: Array[Floor] = []
 var active_floor: Floor
 
 var _by_id := {}
-var _hooked_world: RoomWorld
-var _dirty := false
+## RoomWorld -> floor_id for every hooked world, so content-change
+## signals can be attributed to the floor that actually changed.
+var _world_floor := {}
+## Floor ids with unsaved authoritative changes (Phase D dirty
+## tracking). Keyed by floor_id so a mutation on Floor A never marks
+## Floor B. Cleared per-floor only after that floor saves cleanly.
+var _dirty_floors := {}
+## While true, room_content_changed signals are ignored — floor
+## materialization/hydration emits the same signals as real edits and
+## must not count as dirty.
+var _persist_paused := false
 ## Runtime RoomWorld instances hosting floors OTHER than the bound
 ## room_world — multiplayer floor transitions give each occupied floor
 ## its own world so players can stand on different floors at once.
@@ -173,6 +182,12 @@ func _unregister_floor(floor_id: StringName) -> bool:
 		return false
 	_by_id.erase(floor_id)
 	floors.erase(floor_def)
+	_dirty_floors.erase(floor_id)
+	# Drop world->floor attribution for any world still hosting it;
+	# the world itself is released separately by the caller.
+	for world in _world_floor.keys():
+		if _world_floor[world] == floor_id:
+			_world_floor.erase(world)
 	if active_floor == floor_def:
 		active_floor = null
 	return true
@@ -224,6 +239,9 @@ func create_floor(floor_id: StringName, display_name := "", room_specs: Array[Fl
 		push_error("FloorManager.create_floor: floor registered but definition save failed (error %d)." % error)
 		unregister_floor(floor_id)
 		return null
+	# floor_def.json is already durable; dirty ensures the manifest +
+	# layout are written by the next autosave/shutdown save.
+	mark_floor_dirty(floor_id)
 	return floor_def
 
 ## Reports whether a floor may be deleted. Returns
@@ -457,12 +475,15 @@ func activate_floor(floor_id: StringName) -> bool:
 		push_error("FloorManager has no floor '%s'." % floor_id)
 		return false
 	_apply_layout_override(floor_def)
-	if not materialize_floor(floor_def):
+	_persist_paused = true
+	var materialized := materialize_floor(floor_def)
+	_persist_paused = false
+	if not materialized:
 		return false
-	_hook_world(room_world)
+	_hook_world(room_world, floor_def.floor_id)
 	room_world.save_directory = floor_save_dir(floor_def.floor_id)
 	active_floor = floor_def
-	_dirty = true
+	mark_floor_dirty()
 	return true
 
 # ------------------------------------------------------------------
@@ -512,7 +533,10 @@ func materialize_runtime_floor(floor_id: StringName, world: RoomWorld) -> bool:
 			floor_id, ", ".join(problems)])
 		return false
 	world.save_directory = floor_save_dir(floor_id)
-	if not materialize_floor(floor_def, world):
+	_persist_paused = true
+	var materialized := materialize_floor(floor_def, world)
+	_persist_paused = false
+	if not materialized:
 		return false
 	var expected := 0
 	for spec in floor_def.rooms:
@@ -522,8 +546,10 @@ func materialize_runtime_floor(floor_id: StringName, world: RoomWorld) -> bool:
 		push_error("FloorManager.materialize_runtime_floor: floor '%s' materialized %d rooms, expected %d." % [
 			floor_id, world.registry.get_rooms().size(), expected])
 		return false
-	_hook_world(world)
+	_hook_world(world, floor_id)
+	_persist_paused = true
 	world.load_room_states()
+	_persist_paused = false
 	# load_room_states replaces the graph with the saved one; re-run
 	# auto-connect afterwards, same as load_floor.
 	if floor_def.auto_connect_adjacent:
@@ -543,9 +569,8 @@ func release_runtime_world(floor_id: StringName) -> bool:
 	if world == null:
 		return false
 	runtime_worlds.erase(floor_id)
-	if _hooked_world == world:
-		_hooked_world = null
 	if is_instance_valid(world):
+		_world_floor.erase(world)
 		(world as Node).queue_free()
 	return true
 
@@ -561,14 +586,81 @@ func floor_save_dir(floor_id: StringName) -> String:
 func has_floor_save(floor_id: StringName) -> bool:
 	return FloorSaveSystem.has_save(floor_id)
 
-## Advisory dirty flag: true while the active floor may have changes
-## not yet written to its save directory. Saves are eager (on floor
-## switch, F5, and exit), so this mainly serves a future floor UI.
-func is_floor_dirty() -> bool:
-	return _dirty
+## Floor ids with unsaved authoritative changes, for autosave/shutdown
+## reporting. Read-only snapshot — mutate via mark/save paths only.
+func dirty_floor_ids() -> Array:
+	return _dirty_floors.keys()
 
-func mark_floor_dirty() -> void:
-	_dirty = true
+## Advisory dirty flag: true while the ACTIVE floor has changes not
+## yet written to its save directory. Other materialized floors are
+## tracked individually — see dirty_floor_ids()/save_all_dirty().
+func is_floor_dirty() -> bool:
+	return active_floor != null and _dirty_floors.has(active_floor.floor_id)
+
+## Marks a floor dirty. Defaults to the active floor; pass an explicit
+## floor_id for runtime worlds. No-op on multiplayer clients — replica
+## state is never "dirty" because clients never persist.
+func mark_floor_dirty(floor_id: StringName = &"") -> void:
+	if floor_id == &"":
+		if active_floor == null:
+			return
+		floor_id = active_floor.floor_id
+	if structural_edits_readonly():
+		return
+	_dirty_floors[floor_id] = true
+
+## Floor-scoped save used by autosave/shutdown (Phase D): persists the
+## floor's room contents + connections + layout + manifest through the
+## existing save format, for whichever world hosts it — bound world or
+## runtime_worlds entry. Uses save_room_states (no player_state.json):
+## player bodies are transient session state, never shared content.
+## Floors with no materialized world still get layout+manifest so a
+## created-but-unvisited floor survives restart. On success only THIS
+## floor's dirty flag clears; a failed save keeps it dirty.
+func save_floor_state(floor_id: StringName) -> bool:
+	var floor_def := get_floor(floor_id)
+	if floor_def == null:
+		return false
+	var dir := floor_save_dir(floor_id)
+	if dir.is_empty():
+		push_error("FloorManager: floor id '%s' cannot be used as a save directory." % floor_id)
+		return false
+	var world := world_for_floor(floor_id)
+	var ok := true
+	if world != null:
+		world.save_directory = dir
+		ok = world.save_room_states()
+	if ok:
+		var layout_error := FloorSaveSystem.save_layout(floor_def)
+		if layout_error != OK:
+			ok = false
+			push_error("FloorManager failed to write layout for floor '%s' (error %d)." % [floor_id, layout_error])
+	if ok:
+		var error := FloorSaveSystem.save_manifest(floor_def)
+		if error != OK:
+			ok = false
+			push_error("FloorManager failed to write manifest for floor '%s' (error %d)." % [floor_id, error])
+	if ok:
+		_dirty_floors.erase(floor_id)
+	else:
+		push_error("FloorManager failed to save floor '%s'; it stays dirty for the next autosave." % floor_id)
+	return ok
+
+## Saves every dirty floor independently (Phase D autosave/shutdown).
+## Dirty ids whose floor was unregistered are pruned. Returns
+## {"saved": [ids], "failed": [ids]}; failed floors remain dirty.
+func save_all_dirty() -> Dictionary:
+	var saved: Array = []
+	var failed: Array = []
+	for floor_id in _dirty_floors.keys():
+		if get_floor(floor_id) == null:
+			_dirty_floors.erase(floor_id)
+			continue
+		if save_floor_state(floor_id):
+			saved.append(floor_id)
+		else:
+			failed.append(floor_id)
+	return {"saved": saved, "failed": failed}
 
 ## Saves the active floor: every room's contents, the connection graph,
 ## and the player's room/position — all under the floor's own save
@@ -599,7 +691,7 @@ func save_active_floor() -> bool:
 			ok = false
 			push_error("FloorManager failed to write manifest for floor '%s' (error %d)." % [floor_def.floor_id, error])
 	if ok:
-		_dirty = false
+		_dirty_floors.erase(floor_def.floor_id)
 	else:
 		push_error("FloorManager failed to save floor '%s'; existing save data was left in place." % floor_def.floor_id)
 	return ok
@@ -644,17 +736,20 @@ func load_floor(floor_id: StringName, target_world: RoomWorld = null) -> bool:
 		return false
 	var dir := floor_save_dir(floor_id)
 	world.save_directory = dir
+	_persist_paused = true
 	if not materialize_floor(floor_def, world):
+		_persist_paused = false
 		return false
 	var expected := 0
 	for spec in floor_def.rooms:
 		if spec != null:
 			expected += 1
 	if world.registry.get_rooms().size() != expected:
+		_persist_paused = false
 		push_error("FloorManager.load_floor: floor '%s' materialized %d rooms, expected %d." % [
 			floor_id, world.registry.get_rooms().size(), expected])
 		return false
-	_hook_world(world)
+	_hook_world(world, floor_id)
 	if status == "ok":
 		world.load_all_rooms()
 		# load_connections replaces the whole graph with the saved one —
@@ -663,10 +758,13 @@ func load_floor(floor_id: StringName, target_world: RoomWorld = null) -> bool:
 		# as the legacy boot order did.
 		if floor_def.auto_connect_adjacent:
 			world.auto_connect_adjacent_rooms()
+	_persist_paused = false
 	_ensure_player_placement(world, floor_def)
+	# A successful load replaced in-memory state with disk state —
+	# the floor is clean regardless of which world hosts it.
+	_dirty_floors.erase(floor_id)
 	if world == room_world:
 		active_floor = floor_def
-		_dirty = false
 		floor_switched.emit(floor_def)
 	return true
 
@@ -686,13 +784,16 @@ func load_floor_without_save(floor_id: StringName, target_world: RoomWorld = nul
 	if not problems.is_empty():
 		push_error("FloorManager.load_floor_without_save: floor '%s' is invalid: %s" % [floor_id, ", ".join(problems)])
 		return false
-	if not materialize_floor(floor_def, world):
+	_persist_paused = true
+	var materialized := materialize_floor(floor_def, world)
+	_persist_paused = false
+	if not materialized:
 		return false
-	_hook_world(world)
-	world.save_directory = floor_save_dir(floor_def.floor_id)
+	_hook_world(world, floor_id)
+	world.save_directory = floor_save_dir(floor_id)
+	_dirty_floors.erase(floor_id)
 	if world == room_world:
 		active_floor = floor_def
-		_dirty = false
 		floor_switched.emit(floor_def)
 	return true
 
@@ -839,8 +940,7 @@ func _add_room_to_floor(floor_def: Floor, world: RoomWorld, spec: FloorRoomSpec)
 		floor_def.spawn_position = Vector2i(bounds.size.x >> 1, bounds.size.y >> 1)
 	if floor_def.auto_connect_adjacent:
 		world.auto_connect_adjacent_rooms()
-	if floor_def == active_floor:
-		_dirty = true
+	mark_floor_dirty(floor_def.floor_id)
 	return {"ok": true, "room": room, "spec": spec, "reason": ""}
 
 ## Reports whether a room may be deleted from the active floor.
@@ -982,8 +1082,7 @@ func _remove_room_from_floor(floor_def: Floor, world: RoomWorld, room_id: Vector
 		if conn_error != OK:
 			push_warning("FloorManager.remove_room: connection save failed (error %d)." % conn_error)
 		_persist_room_layout(floor_def)
-	if floor_def == active_floor:
-		_dirty = true
+	mark_floor_dirty(floor_def.floor_id)
 	return true
 
 ## Sets both visibility flags on a room and its floor spec, optionally
@@ -1003,6 +1102,7 @@ func _set_room_visibility(floor_def: Floor, world: RoomWorld, room_id: Vector2i,
 	spec.show_outside = show_outside
 	if persist:
 		_persist_room_layout(floor_def)
+	mark_floor_dirty(floor_def.floor_id)
 	return true
 
 ## Server/SP entry point: visibility change on any floor with a
@@ -1207,17 +1307,24 @@ func _player() -> Player:
 	return get_tree().get_first_node_in_group(&"player") as Player
 
 ## Connects the world's content-change signal once so room edits mark
-## the active floor dirty.
-func _hook_world(world: RoomWorld) -> void:
-	if world == null or _hooked_world == world:
+## THAT floor dirty. floor_id is stored per world — the same signal
+## fires for every materialized world and must be attributed correctly.
+func _hook_world(world: RoomWorld, floor_id: StringName) -> void:
+	if world == null:
 		return
-	_hooked_world = world
-	if not world.room_content_changed.is_connected(_on_room_content_changed):
-		world.room_content_changed.connect(_on_room_content_changed)
+	_world_floor[world] = floor_id
+	var callback := _on_world_content_changed.bind(world)
+	if not world.room_content_changed.is_connected(callback):
+		world.room_content_changed.connect(callback)
 
-func _on_room_content_changed() -> void:
-	if active_floor != null:
-		_dirty = true
+func _on_world_content_changed(world: RoomWorld) -> void:
+	if _persist_paused:
+		return
+	var floor_id: Variant = _world_floor.get(world)
+	if floor_id == null and world == room_world and active_floor != null:
+		floor_id = active_floor.floor_id
+	if floor_id is StringName:
+		mark_floor_dirty(floor_id)
 
 ## Places the player on the floor's entry room after a load/materialize.
 ## When the floor's saved player state was already applied by

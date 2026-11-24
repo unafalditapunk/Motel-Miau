@@ -115,15 +115,19 @@ func _ready() -> void:
 	_setup_multiplayer()
 
 func _exit_tree() -> void:
-	# A dedicated server is world state, not a player — never let it
-	# write to the local save directory on shutdown.
+	# A dedicated server IS the persistence owner (Phase D): on a
+	# normal quit it saves every dirty floor through the net manager
+	# instead of the single-floor SP path. An abrupt kill bypasses
+	# this — autosave bounds the lost progress.
 	if _net_manager != null and _net_manager.dedicated_server:
+		_net_manager.shutdown_save()
 		return
 	save_game()
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		if _net_manager != null and _net_manager.dedicated_server:
+			_net_manager.shutdown_save()
 			return
 		save_game()
 
@@ -298,6 +302,12 @@ func _net_client_readonly() -> bool:
 
 func save_game() -> void:
 	if _net_client_readonly():
+		return
+	# Dedicated server: F5-style saves cover EVERY dirty floor, not
+	# just the bound world's active floor.
+	if _net_manager != null and _net_manager.dedicated_server:
+		if floor_manager != null:
+			floor_manager.save_all_dirty()
 		return
 	if floor_manager != null and floor_manager.active_floor != null:
 		floor_manager.save_active_floor()

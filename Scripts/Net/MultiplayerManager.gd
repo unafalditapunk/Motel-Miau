@@ -94,6 +94,15 @@ var _debug_struct_ops: Array = []
 ## Debug: --floor-op=create:id[:name] | delete:id (repeatable) —
 ## floor catalog requests fired once each after sync.
 var _debug_floor_ops: Array = []
+## Phase D persistence: dedicated-server autosave interval (seconds,
+## --autosave=, default 60) and shutdown-save state.
+var _autosave_interval := 60.0
+var _autosave_elapsed := 0.0
+var _shutting_down := false
+## Debug: --shutdown-after=SEC quits the dedicated server after N
+## seconds so the shutdown-save path can be exercised headless.
+var _shutdown_after := 0.0
+var _shutdown_elapsed := 0.0
 var _synced_msec := -1
 var _dump_at_msec := 0
 ## Client UI feedback: emitted for every build result this peer
@@ -150,6 +159,10 @@ static func parse_args(args: PackedStringArray) -> Dictionary:
 			if not result.has("struct_ops"):
 				result["struct_ops"] = []
 			(result["struct_ops"] as Array).append(arg.get_slice("=", 1))
+		elif arg.begins_with("--autosave="):
+			result["autosave"] = arg.get_slice("=", 1).to_float()
+		elif arg.begins_with("--shutdown-after="):
+			result["shutdown_after"] = arg.get_slice("=", 1).to_float()
 		elif arg.begins_with("--build-place="):
 			# Legacy single-op form: x,y:id -> block place.
 			if not result.has("build_ops"):
@@ -216,6 +229,8 @@ func setup(world: WorldBootstrap, args: Dictionary) -> void:
 	_debug_floor_ops = _parse_floor_ops(args.get("floor_ops", []))
 	for travel in args.get("travels", []):
 		_debug_travels.append(StringName(str(travel)))
+	_autosave_interval = float(args.get("autosave", 60.0))
+	_shutdown_after = float(args.get("shutdown_after", 0.0))
 
 func _process(delta: float) -> void:
 	if mode == Mode.CLIENT:
@@ -239,6 +254,21 @@ func _process(delta: float) -> void:
 		_debug_travels.remove_at(0)
 		var ok := request_floor_transition(next_travel)
 		print("MultiplayerManager: --travel '%s' request -> %s" % [next_travel, ok])
+	# Phase D: dedicated-server autosave + debug shutdown timer.
+	# Synchronous saves run on the main thread — a floor mutated
+	# mid-save simply re-marks dirty and is picked up next interval.
+	if dedicated_server and not _shutting_down:
+		if _shutdown_after > 0.0:
+			_shutdown_elapsed += delta
+			if _shutdown_elapsed >= _shutdown_after:
+				_shutdown_elapsed = -1.0
+				print("MultiplayerManager: --shutdown-after reached; quitting (shutdown save runs on exit).")
+				get_tree().quit()
+		if _autosave_interval > 0.0:
+			_autosave_elapsed += delta
+			if _autosave_elapsed >= _autosave_interval:
+				_autosave_elapsed = 0.0
+				_run_autosave()
 	# Server: drop peers that never acknowledged their snapshot.
 	if mode == Mode.SERVER and not _pending_peers.is_empty():
 		var now := Time.get_ticks_msec()
@@ -326,6 +356,54 @@ func _dump_world_rooms(tag: String, world: RoomWorld, floor_id: StringName) -> v
 func _exit_tree() -> void:
 	if multiplayer != null and multiplayer.multiplayer_peer != null:
 		multiplayer.multiplayer_peer.close()
+
+# ------------------------------------------------------------------
+# Server persistence (Phase D)
+# ------------------------------------------------------------------
+
+## Periodic autosave: writes every dirty floor through
+## FloorManager.save_all_dirty — unchanged floors are skipped, failed
+## floors stay dirty for the next interval. Synchronous by design:
+## saves are small JSON writes and concurrency would risk corruption.
+func _run_autosave() -> void:
+	var fm := _world.floor_manager if _world != null else null
+	if fm == null:
+		return
+	var started := Time.get_ticks_msec()
+	var result := fm.save_all_dirty()
+	var elapsed := Time.get_ticks_msec() - started
+	var saved := (result["saved"] as Array).size()
+	var failed := (result["failed"] as Array).size()
+	if saved > 0 or failed > 0:
+		print("MultiplayerManager: autosave — %d floor(s) saved, %d failed in %d ms." % [
+			saved, failed, elapsed])
+	if failed > 0:
+		push_warning("MultiplayerManager: autosave failed for floors %s; they stay dirty." % [
+			result["failed"]])
+
+## Reliable shutdown save for the dedicated server: stops accepting
+## new world mutations, then persists every dirty floor (contents,
+## connections, layout, manifest). The floor catalog itself is already
+## durable — floor_def.json/floor deletes are written eagerly per op.
+## Called from WorldBootstrap on quit/close-request; an abrupt kill
+## (taskkill /F, power loss) bypasses it — autosave bounds the loss.
+func shutdown_save() -> void:
+	if mode != Mode.SERVER or _shutting_down:
+		return
+	_shutting_down = true
+	var fm := _world.floor_manager if _world != null else null
+	if fm == null:
+		return
+	var started := Time.get_ticks_msec()
+	var result := fm.save_all_dirty()
+	var elapsed := Time.get_ticks_msec() - started
+	var saved := (result["saved"] as Array).size()
+	var failed := (result["failed"] as Array).size()
+	print("MultiplayerManager: shutdown save — %d floor(s) saved, %d failed in %d ms." % [
+		saved, failed, elapsed])
+	if failed > 0:
+		push_warning("MultiplayerManager: shutdown save failed for floors %s." % [
+			result["failed"]])
 
 # ------------------------------------------------------------------
 # Server side
@@ -831,6 +909,9 @@ func _reject_transition(peer_id: int, reason: StringName) -> void:
 ## Validates and applies a floor transition for one peer. Every
 ## failure rejects without touching the peer's body or any world.
 func _handle_floor_transition(peer_id: int, floor_id: StringName) -> void:
+	if _shutting_down:
+		_reject_transition(peer_id, &"shutting_down")
+		return
 	var body: Player = _bodies.get(peer_id)
 	if body == null:
 		_reject_transition(peer_id, &"not_ready")
@@ -921,7 +1002,7 @@ func _handle_floor_transition(peer_id: int, floor_id: StringName) -> void:
 
 @rpc("any_peer", "call_remote", "reliable")
 func _rpc_build_place(op_id: int, request: Dictionary) -> void:
-	if mode != Mode.SERVER:
+	if mode != Mode.SERVER or _shutting_down:
 		return
 	var sender := multiplayer.get_remote_sender_id()
 	if not _claim_build_op(sender, op_id):
@@ -968,7 +1049,7 @@ func _rpc_build_place(op_id: int, request: Dictionary) -> void:
 
 @rpc("any_peer", "call_remote", "reliable")
 func _rpc_build_remove(op_id: int, request: Dictionary) -> void:
-	if mode != Mode.SERVER:
+	if mode != Mode.SERVER or _shutting_down:
 		return
 	var sender := multiplayer.get_remote_sender_id()
 	if not _claim_build_op(sender, op_id):
@@ -1170,6 +1251,8 @@ func _rpc_struct_op(op_id: int, op: Dictionary) -> void:
 ## build-op dedup (_build_op_max) so op ids stay monotonic across both
 ## protocols — the client shares one serial for all requests.
 func _handle_struct_op(peer_id: int, op_id: int, op: Dictionary) -> void:
+	if _shutting_down:
+		return
 	if not _claim_build_op(peer_id, op_id):
 		_reject_struct(peer_id, op_id, &"duplicate")
 		return
@@ -1418,6 +1501,8 @@ func _rpc_floor_op(op_id: int, op: Dictionary) -> void:
 	_handle_floor_op(multiplayer.get_remote_sender_id(), op_id, op)
 
 func _handle_floor_op(peer_id: int, op_id: int, op: Dictionary) -> void:
+	if _shutting_down:
+		return
 	if not _claim_build_op(peer_id, op_id):
 		_reject_floor(peer_id, op_id, &"duplicate")
 		return

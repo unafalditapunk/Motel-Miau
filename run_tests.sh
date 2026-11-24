@@ -42,6 +42,7 @@ TESTS=(
     FloorTransitionSmokeTest
     StructuralOpsSmokeTest
     FloorOpsSmokeTest
+    ServerPersistenceSmokeTest
 )
 
 if [ -n "$FILTER" ]; then
