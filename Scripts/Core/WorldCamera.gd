@@ -44,10 +44,7 @@ func _process(delta: float) -> void:
 	var target := _get_follow_target()
 	if target == null:
 		return
-	var desired := target.global_position + focus_offset
-	if clamp_to_center_bounds and center_bounds.has_area():
-		desired.x = clampf(desired.x, center_bounds.position.x, center_bounds.end.x)
-		desired.y = clampf(desired.y, center_bounds.position.y, center_bounds.end.y)
+	var desired := _desired_position(target)
 	# A teleport (floor portal, floor switch, room connection, spawn)
 	# moves the target farther than any single movement step — snap
 	# the camera instead of letting it glide across the world.
@@ -62,6 +59,29 @@ func _process(delta: float) -> void:
 	global_position = global_position.lerp(desired, t)
 	if global_position.distance_to(desired) <= 0.25:
 		global_position = desired
+
+func _desired_position(target: Node2D) -> Vector2:
+	var desired := target.global_position + focus_offset
+	if clamp_to_center_bounds and center_bounds.has_area():
+		desired.x = clampf(desired.x, center_bounds.position.x, center_bounds.end.x)
+		desired.y = clampf(desired.y, center_bounds.position.y, center_bounds.end.y)
+	return desired
+
+## Called by the follow target right after it teleports (place_at).
+## Applies the same discontinuity rule as _process immediately, so a
+## large jump snaps this frame instead of leaving one rendered frame
+## with the camera still at the old position. Small jumps keep the
+## normal smoothing.
+func notify_target_teleported() -> void:
+	var target := _get_follow_target()
+	if target == null:
+		return
+	var teleported := not _follow_pos_valid \
+		or target.global_position.distance_to(_last_follow_pos) > follow_snap_distance
+	_follow_pos_valid = true
+	_last_follow_pos = target.global_position
+	if teleported:
+		global_position = _desired_position(target)
 
 func _get_follow_target() -> Node2D:
 	if follow_target != null and is_instance_valid(follow_target):

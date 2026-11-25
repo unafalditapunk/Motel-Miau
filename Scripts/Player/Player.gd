@@ -102,6 +102,14 @@ func place_at(new_grid_position: Vector2i, new_elevation: float) -> void:
 	_cancel_movement()
 	_update_visual_position()
 	authoritative_state_changed.emit()
+	# A teleport must not leave the camera a frame behind: notify it
+	# now so large jumps snap immediately instead of flashing the
+	# player at the old camera position for one rendered frame.
+	# Remote avatars never drive the camera.
+	if not network_remote and is_inside_tree():
+		var world := get_tree().get_first_node_in_group(&"world") as WorldBootstrap
+		if world != null and world.world_camera != null:
+			world.world_camera.notify_target_teleported()
 
 ## Remote-avatar update: retarget room/cell/elevation to a state the
 ## server already validated and replay the same eased step locally.
@@ -530,7 +538,10 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	if network_remote:
 		return
 	if _world_ui_blocked():
-		_held_moves.clear()
+		# Keep _held_moves: keys held through a transition (floor
+		# portal, floor switch) must resume moving in that direction
+		# once the lock releases. _update_held_movement prunes keys
+		# that are no longer physically pressed once unblocked.
 		_buffered_direction = Vector2i.ZERO
 		return
 	if not (event is InputEventKey):

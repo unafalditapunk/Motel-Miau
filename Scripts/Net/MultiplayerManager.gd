@@ -741,6 +741,7 @@ func _remove_avatar(peer_id: int) -> void:
 	var avatar: Player = _avatars.get(peer_id)
 	if avatar != null and is_instance_valid(avatar):
 		avatar.queue_free()
+		print("MultiplayerManager: avatar for peer %d despawned." % peer_id)
 	_avatars.erase(peer_id)
 
 # ------------------------------------------------------------------
@@ -1197,13 +1198,17 @@ func _handle_floor_transition(peer_id: int, floor_id: StringName,
 	body.room = entry
 	body.block_layer = entry.block_layer
 	body.room_size = entry.size
-	body.place_at(spawn, body.stand_elevation_at(spawn))
-	# Remove this player's avatar everywhere, then hand the requester
-	# a private snapshot of the destination world plus spawn info and
-	# the definitions of players already there. transition_id ties
-	# the snapshot back to the client's request serial so stale
-	# snapshots cannot complete a newer pending transition.
+	# Despawn BEFORE place_at: place_at emits authoritative_state_changed,
+	# whose broadcast makes floor-mates spawn this player's avatar on the
+	# new floor. A despawn sent after it would wipe that fresh avatar and
+	# the player would stay invisible until their next move.
 	_rpc_despawn_player.rpc(peer_id)
+	body.place_at(spawn, body.stand_elevation_at(spawn))
+	# Hand the requester a private snapshot of the destination world
+	# plus spawn info and the definitions of players already there.
+	# transition_id ties the snapshot back to the client's request
+	# serial so stale snapshots cannot complete a newer pending
+	# transition.
 	snapshot["spawn"] = {
 		"room_id": [entry.room_coordinates.x, entry.room_coordinates.y],
 		"cell": [spawn.x, spawn.y],
