@@ -81,10 +81,12 @@ persistence-free.
   category; elevation recomputed server-side; removal picks topmost
   occupant and verifies request identity (`target_changed` on
   mismatch). Floor-scoped via the sender's tracked floor.
-- Structural ops: room create/delete and visibility changes validate
-  against the peer's current floor world; layout.json/connections.json
-  are rewritten eagerly server-side; clients apply via unguarded
-  `replica_*` paths.
+- Structural ops: room create/delete, visibility changes, and spawn
+  point place/remove (`spawn` op — global world cell, min 1 / max 4
+  per floor, must sit inside a room footprint) validate against the
+  peer's current floor world; layout.json/connections.json are
+  rewritten eagerly server-side; clients apply via unguarded
+  `replica_*` paths (`replica_apply_spawn` for spawn ops).
 - Floor ops: create broadcasts the canonical `floor_def.json`-format
   dict (clients rebuild in memory, zero disk writes); delete removes
   the floor's entire save directory after occupancy checks.
@@ -92,7 +94,8 @@ persistence-free.
 ## Persistence and autosave
 
 - Save layout per floor: `user://floors/<id>/` with `floor_def.json`
-  (definition), `layout.json` (room specs/entry/spawn/visibility),
+  (definition), `layout.json` (room specs/entry/spawn/spawn_points/
+  visibility),
   `room_*.json`, `connections.json`, and `floor.json` manifest written
   last as commit marker. No `player_state.json` in floor saves —
   bodies are transient session state.

@@ -27,6 +27,10 @@ func _initialize() -> void:
 func _process(_delta: float) -> bool:
 	_frames += 1
 	if _frames == 2:
+		# P3 slide transitions defer the floor switch until the
+		# slide-out finishes; zeroing the slide duration keeps
+		# switches synchronous for this frame-driven test.
+		_world.room_world.room_slide_duration = 0.0
 		_room_world = _world.room_world
 		_editor = _room_world.get_node_or_null("FloorEditor") as FloorEditor
 		_camera = _world.world_camera

@@ -254,16 +254,35 @@ func _on_enter_pressed(floor_id: StringName) -> void:
 			_set_status("Could not request travel to '%s'." % floor_id, true)
 		else:
 			_set_status("Requesting travel to %s..." % floor_id, false)
+			close()
 		return
 	if manager.active_floor != null and manager.active_floor.floor_id == floor_id:
 		return
 	_set_status("Traveling to %s..." % floor_id, false)
-	# Synchronous switch; on success the world is already rebuilt.
-	if manager.switch_floor(floor_id):
+	# Slide transition when the overlay exists: the switch is deferred
+	# until the slide-out finishes. Close the panel as soon as the
+	# travel is accepted — the overlay's message label reports any
+	# later failure.
+	var overlay := get_tree().get_first_node_in_group(&"transition_overlay") as TransitionOverlay
+	var switched := false
+	if overlay != null:
+		if not overlay.transition_completed.is_connected(_on_transition_completed):
+			overlay.transition_completed.connect(_on_transition_completed)
+		switched = bool(overlay.play_transition(func() -> bool:
+			return manager.switch_floor(floor_id)))
+	else:
+		switched = manager.switch_floor(floor_id)
+	if switched:
 		close()
 	else:
 		_set_status("Could not enter '%s'. See console for details." % floor_id, true)
 		_rebuild_list()
+
+## Async transition result (slide path): surface a failure status
+## when the deferred switch did not complete.
+func _on_transition_completed(success: bool) -> void:
+	if not success and is_open():
+		_set_status("Travel failed. See console for details.", true)
 
 func _on_delete_pressed(floor_id: StringName) -> void:
 	var manager := _resolve_floor_manager()

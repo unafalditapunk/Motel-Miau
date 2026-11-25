@@ -4,6 +4,12 @@ extends Camera2D
 @export_group("Follow")
 @export var follow_target: Node2D
 @export var follow_smoothing := 6.0
+## World-space distance the follow target may jump in a single frame
+## before the camera snaps instead of lerping. Normal movement covers
+## at most one cell step (~36px for the 64x32 iso grid); room/floor
+## teleports jump far more, and the camera should already be on the
+## player when they land rather than gliding across the map.
+@export var follow_snap_distance := 64.0
 @export var focus_offset := Vector2.ZERO
 @export var clamp_to_center_bounds := false
 @export var center_bounds := Rect2()
@@ -19,6 +25,8 @@ extends Camera2D
 var _editor_active := false
 var _pan_dragging := false
 var _pan_drag_last := Vector2.ZERO
+var _last_follow_pos := Vector2.ZERO
+var _follow_pos_valid := false
 
 func _ready() -> void:
 	anchor_mode = Camera2D.ANCHOR_MODE_DRAG_CENTER
@@ -40,7 +48,14 @@ func _process(delta: float) -> void:
 	if clamp_to_center_bounds and center_bounds.has_area():
 		desired.x = clampf(desired.x, center_bounds.position.x, center_bounds.end.x)
 		desired.y = clampf(desired.y, center_bounds.position.y, center_bounds.end.y)
-	if follow_smoothing <= 0.0:
+	# A teleport (floor portal, floor switch, room connection, spawn)
+	# moves the target farther than any single movement step — snap
+	# the camera instead of letting it glide across the world.
+	var teleported := not _follow_pos_valid \
+		or target.global_position.distance_to(_last_follow_pos) > follow_snap_distance
+	_follow_pos_valid = true
+	_last_follow_pos = target.global_position
+	if teleported or follow_smoothing <= 0.0:
 		global_position = desired
 		return
 	var t := 1.0 - exp(-follow_smoothing * delta)

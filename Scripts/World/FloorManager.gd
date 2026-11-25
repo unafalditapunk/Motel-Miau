@@ -60,6 +60,7 @@ func _refuse_readonly(what: String) -> void:
 	push_warning("FloorManager.%s refused: structural edits are read-only for multiplayer clients." % what)
 
 func _ready() -> void:
+	add_to_group(&"floor_managers")
 	# Always scan: register_floor() deduplicates, so floors registered
 	# manually before _ready coexist with resource-loaded ones.
 	_load_floor_resources()
@@ -136,6 +137,7 @@ func _register_floor(floor_def: Floor) -> bool:
 	if _by_id.has(floor_def.floor_id):
 		push_error("FloorManager already has floor '%s'." % floor_def.floor_id)
 		return false
+	_normalize_spawn_points(floor_def)
 	var problems := validate_floor(floor_def)
 	for problem in problems:
 		push_warning("Floor '%s': %s" % [floor_def.floor_id, problem])
@@ -228,6 +230,10 @@ func create_floor(floor_id: StringName, display_name := "", room_specs: Array[Fl
 	var first_size := _resolved_spec_size(first)
 	floor_def.spawn_position = Vector2i(first_size.x >> 1, first_size.y >> 1) \
 		if first_size != Vector2i.ZERO else Vector2i.ZERO
+	# Derive the floor's first spawn point from entry/spawn before
+	# validation — register_floor would do it anyway, but create_floor
+	# validates first.
+	_normalize_spawn_points(floor_def)
 	var problems := validate_floor(floor_def)
 	if not problems.is_empty():
 		push_error("FloorManager.create_floor: floor '%s' is invalid: %s" % [floor_id, ", ".join(problems)])
@@ -281,6 +287,25 @@ func delete_floor(floor_id: StringName) -> bool:
 			push_error("FloorManager.delete_floor: could not leave floor '%s'; delete aborted." % floor_id)
 			return false
 	unregister_floor(floor_id)
+	# Portals on OTHER floors pointing at the deleted floor must not
+	# dangle: prune them and persist each affected floor's layout so
+	# the next load doesn't resurrect them. The trigger path also
+	# guards on get_floor(), so a missed prune degrades to "normal
+	# movement", never an invalid transition.
+	for other in floors.duplicate():
+		if other == null or other.portals.is_empty():
+			continue
+		var kept_portals: Array[FloorPortal] = []
+		var changed := false
+		for portal in other.portals:
+			if portal != null and portal.destination_floor_id == floor_id:
+				changed = true
+				continue
+			kept_portals.append(portal)
+		if changed:
+			other.portals = kept_portals
+			_persist_room_layout(other)
+			mark_floor_dirty(other.floor_id)
 	var error := FloorSaveSystem.delete_floor_save(floor_id)
 	if error != OK:
 		push_warning("FloorManager.delete_floor: floor unregistered but save data removal failed (error %d)." % error)
@@ -312,6 +337,19 @@ func validate_floor(floor_def: Floor) -> Array[String]:
 		problems.append("floor has no rooms")
 	if not seen.has(floor_def.entry_room_id):
 		problems.append("entry room %s is not a registered room" % floor_def.entry_room_id)
+	# Spawn points are meaningless on a roomless floor — the first
+	# room added derives one (_normalize_spawn_points in
+	# _add_room_to_floor). Skip the checks until rooms exist.
+	if not floor_def.rooms.is_empty():
+		if floor_def.spawn_points.is_empty():
+			problems.append("floor has no spawn points")
+		elif floor_def.spawn_points.size() > Floor.MAX_SPAWN_POINTS:
+			problems.append("floor has %d spawn points (max %d)" % [
+				floor_def.spawn_points.size(), Floor.MAX_SPAWN_POINTS])
+		else:
+			for cell in floor_def.spawn_points:
+				if spawn_cell_room(floor_def, cell) == null:
+					problems.append("spawn point %s is not inside a room" % _id_text(cell))
 	var bounds := _spec_bounds(floor_def)
 	for i in range(bounds.size()):
 		for j in range(i + 1, bounds.size()):
@@ -328,6 +366,35 @@ func validate_floor(floor_def: Floor) -> Array[String]:
 			problems.append("connection '%s' references missing source room %s" % [connection.connection_id, connection.source_room_id])
 		if not seen.has(connection.destination_room_id):
 			problems.append("connection '%s' references missing destination room %s" % [connection.connection_id, connection.destination_room_id])
+	# Portals: unique ids and cells, owning room must contain the cell,
+	# destination must be another registered floor. A portal whose
+	# destination was deleted is reported here — delete_floor prunes
+	# those eagerly, so reaching this means hand-edited/corrupt data.
+	var portal_ids := {}
+	var portal_cells := {}
+	for portal in floor_def.portals:
+		if portal == null:
+			problems.append("null portal")
+			continue
+		if portal.portal_id == &"":
+			problems.append("portal has no id")
+		elif portal_ids.has(portal.portal_id):
+			problems.append("duplicate portal id '%s'" % portal.portal_id)
+		portal_ids[portal.portal_id] = true
+		if portal_cells.has(portal.world_cell):
+			problems.append("duplicate portal cell %s" % _id_text(portal.world_cell))
+		portal_cells[portal.world_cell] = true
+		var portal_spec := spawn_cell_room(floor_def, portal.world_cell)
+		if portal_spec == null:
+			problems.append("portal '%s' cell %s is not inside a room" % [portal.portal_id, _id_text(portal.world_cell)])
+		elif portal_spec.room_id != portal.room_id:
+			problems.append("portal '%s' room_id %s does not match cell room %s" % [
+				portal.portal_id, _id_text(portal.room_id), _id_text(portal_spec.room_id)])
+		if portal.destination_floor_id == floor_def.floor_id:
+			problems.append("portal '%s' targets its own floor" % portal.portal_id)
+		elif get_floor(portal.destination_floor_id) == null:
+			problems.append("portal '%s' destination floor '%s' is not registered" % [
+				portal.portal_id, portal.destination_floor_id])
 	return problems
 
 ## Specs with a resolvable footprint, paired with their union bounds
@@ -354,6 +421,29 @@ static func _spec_sections(spec: FloorRoomSpec) -> Array[Rect2i]:
 	if size == Vector2i.ZERO:
 		return []
 	return [Rect2i(spec.global_origin, size)]
+
+## True when a global world cell lies inside any of the section rects.
+static func _cell_in_sections(cell: Vector2i, sections: Array[Rect2i]) -> bool:
+	for section in sections:
+		if section.has_point(cell):
+			return true
+	return false
+
+## Cell inside `sections` nearest to `target` (squared distance). Each
+## rect is convex, so clamping into it yields that rect's nearest
+## point; the closest candidate across sections wins. Used to snap
+## derived spawn points into shaped-room footprints.
+static func _nearest_section_cell(sections: Array[Rect2i], target: Vector2i) -> Vector2i:
+	var best := target
+	var best_dist := -1
+	for section in sections:
+		var clamped := target.clamp(section.position, section.end - Vector2i.ONE)
+		var delta := clamped - target
+		var dist: int = delta.x * delta.x + delta.y * delta.y
+		if best_dist < 0 or dist < best_dist:
+			best_dist = dist
+			best = clamped
+	return best
 
 ## Union bounding box of a list of global cell rects.
 static func _sections_bounds(sections: Array[Rect2i]) -> Rect2i:
@@ -523,12 +613,16 @@ func materialize_runtime_floor(floor_id: StringName, world: RoomWorld) -> bool:
 	var saved_specs := floor_def.rooms
 	var saved_entry := floor_def.entry_room_id
 	var saved_spawn := floor_def.spawn_position
+	var saved_spawn_points := floor_def.spawn_points.duplicate()
+	var saved_portals := floor_def.portals.duplicate()
 	_apply_layout_override(floor_def)
 	var problems := validate_floor(floor_def)
 	if not problems.is_empty():
 		floor_def.rooms = saved_specs
 		floor_def.entry_room_id = saved_entry
 		floor_def.spawn_position = saved_spawn
+		floor_def.spawn_points = saved_spawn_points
+		floor_def.portals = saved_portals
 		push_error("FloorManager.materialize_runtime_floor: floor '%s' is invalid: %s" % [
 			floor_id, ", ".join(problems)])
 		return false
@@ -720,12 +814,16 @@ func load_floor(floor_id: StringName, target_world: RoomWorld = null) -> bool:
 	var saved_specs := floor_def.rooms
 	var saved_entry := floor_def.entry_room_id
 	var saved_spawn := floor_def.spawn_position
+	var saved_spawn_points := floor_def.spawn_points.duplicate()
+	var saved_portals := floor_def.portals.duplicate()
 	_apply_layout_override(floor_def)
 	var problems := validate_floor(floor_def)
 	if not problems.is_empty():
 		floor_def.rooms = saved_specs
 		floor_def.entry_room_id = saved_entry
 		floor_def.spawn_position = saved_spawn
+		floor_def.spawn_points = saved_spawn_points
+		floor_def.portals = saved_portals
 		push_error("FloorManager.load_floor: floor '%s' is invalid: %s" % [floor_id, ", ".join(problems)])
 		return false
 	var check := FloorSaveSystem.check_save(floor_id)
@@ -938,6 +1036,8 @@ func _add_room_to_floor(floor_def: Floor, world: RoomWorld, spec: FloorRoomSpec)
 		# floor stays loadable and valid.
 		floor_def.entry_room_id = spec.room_id
 		floor_def.spawn_position = Vector2i(bounds.size.x >> 1, bounds.size.y >> 1)
+		# ...and the floor's first spawn point.
+		_normalize_spawn_points(floor_def)
 	if floor_def.auto_connect_adjacent:
 		world.auto_connect_adjacent_rooms()
 	mark_floor_dirty(floor_def.floor_id)
@@ -1000,6 +1100,16 @@ func _can_delete_room(floor_def: Floor, world: RoomWorld, room_id: Vector2i,
 				break
 		if not keeps_neighbor:
 			return refuse.call("Deleting would isolate adjacent room %s." % _id_text(other_id))
+	# Spawn points: deleting a room removes every spawn point inside
+	# it — allowed only while the floor keeps MIN_SPAWN_POINTS.
+	var spawns := floor_spawn_points(floor_def)
+	if not spawns.is_empty():
+		var inside := 0
+		for cell in spawns:
+			if _cell_in_sections(cell, target_sections):
+				inside += 1
+		if inside > 0 and spawns.size() - inside < Floor.MIN_SPAWN_POINTS:
+			return refuse.call("Room contains spawn point(s); the floor must keep at least %d." % Floor.MIN_SPAWN_POINTS)
 	return {"allowed": true, "reason": ""}
 
 ## Deletes a room from the active floor: unregisters it, removes every
@@ -1074,6 +1184,23 @@ func _remove_room_from_floor(floor_def: Floor, world: RoomWorld, room_id: Vector
 		if spec != null and spec.room_id == room_id:
 			floor_def.rooms.remove_at(i)
 	world.unregister_room(room_id)
+	# Spawn points inside the deleted room go with it; entry/spawn
+	# resync to the first remaining point.
+	if not floor_def.spawn_points.is_empty():
+		var kept: Array[Vector2i] = []
+		for cell in floor_def.spawn_points:
+			if not _cell_in_sections(cell, target_sections):
+				kept.append(cell)
+		floor_def.spawn_points = kept
+		_sync_entry_from_spawns(floor_def)
+	# Portals inside the deleted room go with it (no minimum — unlike
+	# spawn points a floor may end up with zero portals).
+	if not floor_def.portals.is_empty():
+		var kept_portals: Array[FloorPortal] = []
+		for portal in floor_def.portals:
+			if portal != null and portal.room_id != room_id:
+				kept_portals.append(portal)
+		floor_def.portals = kept_portals
 	if persist:
 		# Persist the pruned connection graph immediately — otherwise
 		# the stale connections.json would resurrect doors to the
@@ -1114,6 +1241,474 @@ func set_room_visibility_on_floor(floor_id: StringName, room_id: Vector2i,
 		return false
 	return _set_room_visibility(get_floor(floor_id), world_for_floor(floor_id),
 		room_id, show_from_outside, show_outside, true)
+
+# ------------------------------------------------------------------
+# Spawn points
+# ------------------------------------------------------------------
+##
+## Spawn points are global world cells marking a floor's natural
+## entries (future teleport targets). Invariants: 1..Floor.
+## MAX_SPAWN_POINTS points, each inside a room's footprint, and the
+## FIRST point mirrors entry_room_id/spawn_position so every existing
+## spawn path (load_floor, _ensure_player_placement, floor
+## transitions) keeps working unchanged. Floors registered before the
+## field existed derive one point from entry/spawn
+## (_normalize_spawn_points); layout.json/floor_def.json/snapshots
+## carry the explicit list.
+
+## The floor's spawn points as global world cells. Derives the
+## legacy entry/spawn point on the fly when the list is empty so
+## callers never special-case unnormalized floors.
+func floor_spawn_points(floor_def: Floor) -> Array[Vector2i]:
+	if floor_def == null:
+		return []
+	if not floor_def.spawn_points.is_empty():
+		return floor_def.spawn_points
+	var derived: Variant = _derive_spawn_point(floor_def)
+	return [derived] if derived is Vector2i else []
+
+## The spec whose footprint contains the global world cell, or null.
+## Cell-exact: shaped rooms only own their section cells.
+func spawn_cell_room(floor_def: Floor, world_cell: Vector2i) -> FloorRoomSpec:
+	if floor_def == null:
+		return null
+	for spec in floor_def.rooms:
+		if spec != null and _cell_in_sections(world_cell, _spec_sections(spec)):
+			return spec
+	return null
+
+## Populates spawn_points from entry_room_id/spawn_position when the
+## floor has none — the migration path for .tres floors and old saves.
+## Idempotent; explicit lists are never touched.
+func _normalize_spawn_points(floor_def: Floor) -> void:
+	if floor_def == null or not floor_def.spawn_points.is_empty():
+		return
+	var derived: Variant = _derive_spawn_point(floor_def)
+	if derived is Vector2i:
+		floor_def.spawn_points = [derived]
+
+## Global cell for the legacy entry/spawn: the entry spec's
+## global_origin + spawn_position (clamped into the spec's bounds and
+## snapped inside shaped-room sections), or the first room as
+## fallback. Returns null when the floor has no usable room.
+func _derive_spawn_point(floor_def: Floor) -> Variant:
+	var spec := floor_def.find_room_spec(floor_def.entry_room_id)
+	if spec == null and not floor_def.rooms.is_empty():
+		spec = floor_def.rooms[0]
+	if spec == null:
+		return null
+	var size := _resolved_spec_size(spec)
+	var local := floor_def.spawn_position
+	if size != Vector2i.ZERO:
+		local = local.clamp(Vector2i.ZERO, size - Vector2i.ONE)
+	var global := spec.global_origin + local
+	var sections := _spec_sections(spec)
+	if sections.is_empty():
+		return null
+	if not _cell_in_sections(global, sections):
+		global = _nearest_section_cell(sections, global)
+	return global
+
+## Rewrites entry_room_id/spawn_position to mirror spawn_points[0]:
+## the entry room becomes the spec containing that cell and
+## spawn_position its local coordinate. No-op when the floor has no
+## resolvable spawn point.
+func _sync_entry_from_spawns(floor_def: Floor) -> void:
+	var spawns := floor_spawn_points(floor_def)
+	if spawns.is_empty():
+		return
+	var cell: Vector2i = spawns[0]
+	var spec := spawn_cell_room(floor_def, cell)
+	if spec == null:
+		return
+	floor_def.entry_room_id = spec.room_id
+	floor_def.spawn_position = cell - spec.global_origin
+
+## Reports whether a global world cell may host a new spawn point.
+## Core verdict shared by the active-floor and floor-scoped entry
+## points; persist/dirty marking stays in the callers.
+func _can_place_spawn_point(floor_def: Floor, world_cell: Vector2i) -> Dictionary:
+	var refuse := func(reason: String) -> Dictionary:
+		return {"allowed": false, "reason": reason}
+	if floor_def == null:
+		return refuse.call("No floor.")
+	if spawn_cell_room(floor_def, world_cell) == null:
+		return refuse.call("Spawn points must be inside a room.")
+	var spawns := floor_spawn_points(floor_def)
+	if spawns.has(world_cell):
+		return refuse.call("A spawn point already occupies that cell.")
+	if spawns.size() >= Floor.MAX_SPAWN_POINTS:
+		return refuse.call("Maximum %d spawn points per floor." % Floor.MAX_SPAWN_POINTS)
+	return {"allowed": true, "reason": ""}
+
+## Reports whether a global world cell may host a new spawn point on
+## the ACTIVE floor. Mirrors can_delete_room's verdict shape.
+func can_place_spawn_point(world_cell: Vector2i) -> Dictionary:
+	if structural_edits_readonly():
+		return {"allowed": false, "reason": "Multiplayer client: edits are server-authoritative."}
+	if active_floor == null:
+		return {"allowed": false, "reason": "No active floor."}
+	return _can_place_spawn_point(active_floor, world_cell)
+
+## Floor-scoped counterpart for runtime worlds (multiplayer structural
+## ops). No readonly guard — callers decide (server validates, replica
+## applies through replica_apply_spawn instead).
+func can_place_spawn_point_on_floor(floor_id: StringName, world_cell: Vector2i) -> Dictionary:
+	return _can_place_spawn_point(get_floor(floor_id), world_cell)
+
+## Places a spawn point at a global world cell. Core mutation shared
+## by every entry point; persist=true writes layout.json.
+func _place_spawn_point(floor_def: Floor, world_cell: Vector2i, persist: bool) -> bool:
+	if not bool(_can_place_spawn_point(floor_def, world_cell).get("allowed", false)):
+		return false
+	floor_def.spawn_points.append(world_cell)
+	_sync_entry_from_spawns(floor_def)
+	if persist:
+		_persist_room_layout(floor_def)
+		mark_floor_dirty(floor_def.floor_id)
+	return true
+
+## Places a spawn point on the active floor at a global world cell.
+## Persists layout.json and marks the floor dirty.
+func place_spawn_point(world_cell: Vector2i) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("place_spawn_point")
+		return false
+	if active_floor == null:
+		push_error("FloorManager.place_spawn_point requires an active floor.")
+		return false
+	var verdict := can_place_spawn_point(world_cell)
+	if not bool(verdict.get("allowed", false)):
+		push_error("FloorManager.place_spawn_point: %s" % verdict.get("reason", "refused"))
+		return false
+	return _place_spawn_point(active_floor, world_cell, true)
+
+## Floor-scoped counterpart for runtime worlds (multiplayer). Server
+## path: validates, mutates, persists, marks dirty.
+func place_spawn_point_on_floor(floor_id: StringName, world_cell: Vector2i) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("place_spawn_point_on_floor")
+		return false
+	var floor_def := get_floor(floor_id)
+	if floor_def == null:
+		push_error("FloorManager.place_spawn_point_on_floor: unknown floor '%s'." % floor_id)
+		return false
+	var verdict := _can_place_spawn_point(floor_def, world_cell)
+	if not bool(verdict.get("allowed", false)):
+		push_error("FloorManager.place_spawn_point_on_floor: %s" % verdict.get("reason", "refused"))
+		return false
+	return _place_spawn_point(floor_def, world_cell, true)
+
+## Reports whether the spawn point at a global world cell may be
+## removed: it must exist and the floor must keep at least
+## Floor.MIN_SPAWN_POINTS afterwards.
+func _can_remove_spawn_point(floor_def: Floor, world_cell: Vector2i) -> Dictionary:
+	var refuse := func(reason: String) -> Dictionary:
+		return {"allowed": false, "reason": reason}
+	if floor_def == null:
+		return refuse.call("No floor.")
+	var spawns := floor_spawn_points(floor_def)
+	if not spawns.has(world_cell):
+		return refuse.call("No spawn point on that cell.")
+	if spawns.size() <= Floor.MIN_SPAWN_POINTS:
+		return refuse.call("A floor must keep at least %d spawn point." % Floor.MIN_SPAWN_POINTS)
+	return {"allowed": true, "reason": ""}
+
+func can_remove_spawn_point(world_cell: Vector2i) -> Dictionary:
+	if structural_edits_readonly():
+		return {"allowed": false, "reason": "Multiplayer client: edits are server-authoritative."}
+	if active_floor == null:
+		return {"allowed": false, "reason": "No active floor."}
+	return _can_remove_spawn_point(active_floor, world_cell)
+
+func can_remove_spawn_point_on_floor(floor_id: StringName, world_cell: Vector2i) -> Dictionary:
+	return _can_remove_spawn_point(get_floor(floor_id), world_cell)
+
+## Removes the spawn point at a global world cell. Core mutation;
+## persist=true writes layout.json and marks the floor dirty.
+func _remove_spawn_point(floor_def: Floor, world_cell: Vector2i, persist: bool) -> bool:
+	if not bool(_can_remove_spawn_point(floor_def, world_cell).get("allowed", false)):
+		return false
+	floor_def.spawn_points.erase(world_cell)
+	_sync_entry_from_spawns(floor_def)
+	if persist:
+		_persist_room_layout(floor_def)
+		mark_floor_dirty(floor_def.floor_id)
+	return true
+
+## Removes the spawn point at a global world cell from the active
+## floor, resyncs entry/spawn to the first remaining point, persists
+## layout.json, and marks the floor dirty.
+func remove_spawn_point(world_cell: Vector2i) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("remove_spawn_point")
+		return false
+	if active_floor == null:
+		push_error("FloorManager.remove_spawn_point requires an active floor.")
+		return false
+	var verdict := can_remove_spawn_point(world_cell)
+	if not bool(verdict.get("allowed", false)):
+		push_error("FloorManager.remove_spawn_point: %s" % verdict.get("reason", "refused"))
+		return false
+	return _remove_spawn_point(active_floor, world_cell, true)
+
+## Floor-scoped counterpart for runtime worlds (multiplayer). Server
+## path: validates, mutates, persists, marks dirty.
+func remove_spawn_point_on_floor(floor_id: StringName, world_cell: Vector2i) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("remove_spawn_point_on_floor")
+		return false
+	var floor_def := get_floor(floor_id)
+	if floor_def == null:
+		push_error("FloorManager.remove_spawn_point_on_floor: unknown floor '%s'." % floor_id)
+		return false
+	var verdict := _can_remove_spawn_point(floor_def, world_cell)
+	if not bool(verdict.get("allowed", false)):
+		push_error("FloorManager.remove_spawn_point_on_floor: %s" % verdict.get("reason", "refused"))
+		return false
+	return _remove_spawn_point(floor_def, world_cell, true)
+
+## Replica apply (multiplayer clients): applies an accepted spawn op
+## to the floor's in-memory spec list — no validation verdicts, no
+## persistence, no dirty marking; the authoritative result already
+## happened on the server. Deterministic: place appends, remove
+## erases, both resync entry/spawn to the first point.
+func replica_apply_spawn(floor_id: StringName, world_cell: Vector2i, place: bool) -> bool:
+	var floor_def := get_floor(floor_id)
+	if floor_def == null:
+		return false
+	var ok := false
+	if place:
+		ok = _place_spawn_point(floor_def, world_cell, false)
+	else:
+		ok = _remove_spawn_point(floor_def, world_cell, false)
+	return ok
+
+# ------------------------------------------------------------------
+# Floor portals (Phase P1): FloorPortal resources on Floor.portals —
+# global world cells that transition the player to another Floor.
+# Independent from RoomConnection (which stays intra-floor). Portals
+# are floor data: they persist in layout.json/floor_def.json, ride
+# world snapshots, and need no runtime world reference.
+# ------------------------------------------------------------------
+
+## The floor's portals (empty list when none or no floor).
+func floor_portals(floor_def: Floor) -> Array[FloorPortal]:
+	if floor_def == null:
+		return []
+	return floor_def.portals
+
+## The portal occupying a global world cell on the ACTIVE floor, or
+## null. At most one portal may occupy a cell (placement enforces it).
+func portal_at(world_cell: Vector2i) -> FloorPortal:
+	return portal_at_on_floor(active_floor.floor_id if active_floor != null else &"", world_cell)
+
+## Floor-scoped lookup: the portal at a global world cell on the given
+## floor, or null. Works for unmaterialized floors — portals are spec
+## data, not world state.
+func portal_at_on_floor(floor_id: StringName, world_cell: Vector2i) -> FloorPortal:
+	var floor_def := get_floor(floor_id)
+	if floor_def == null:
+		return null
+	for portal in floor_def.portals:
+		if portal != null and portal.world_cell == world_cell:
+			return portal
+	return null
+
+## Cell-only verdict for the Creation Mode ghost: the cell must be
+## inside a room footprint, host no portal yet, and not be covered by
+## an interactive RoomConnection (which would make stepping onto it
+## ambiguous). Destination checks live in can_place_portal.
+func portal_cell_status(world_cell: Vector2i) -> Dictionary:
+	if structural_edits_readonly():
+		return {"free": false, "reason": "Multiplayer client: edits are server-authoritative."}
+	if active_floor == null:
+		return {"free": false, "reason": "No active floor."}
+	return _portal_cell_status_for(active_floor, room_world, world_cell, null)
+
+func _portal_cell_status_for(floor_def: Floor, world: RoomWorld,
+		world_cell: Vector2i, exclude: FloorPortal) -> Dictionary:
+	var refuse := func(reason: String) -> Dictionary:
+		return {"free": false, "reason": reason}
+	if floor_def == null:
+		return refuse.call("No floor.")
+	var spec := spawn_cell_room(floor_def, world_cell)
+	if spec == null:
+		return refuse.call("Portals must be inside a room.")
+	for portal in floor_def.portals:
+		if portal != null and portal != exclude and portal.world_cell == world_cell:
+			return refuse.call("A portal already occupies that cell.")
+	# An interactive connection covering this cell already triggers a
+	# room transition on entry — a portal there would be ambiguous.
+	var local_cell := world_cell - spec.global_origin
+	for connection in _portal_scan_connections(floor_def, world):
+		if connection == null or not connection.interactive:
+			continue
+		var traversal: Dictionary = connection.traversal_for(spec.room_id)
+		if traversal.is_empty():
+			continue
+		if (traversal["exits"] as Array).has(local_cell):
+			return refuse.call("Cell is covered by interactive connection '%s'." % connection.connection_id)
+	return {"free": true, "reason": ""}
+
+## Connections to scan for interactive coverage: the live world graph
+## when the floor is materialized (includes restored/saved links),
+## else the floor's authored connection list.
+func _portal_scan_connections(floor_def: Floor, world: RoomWorld) -> Array:
+	if world != null and world.connections != null:
+		return world.connections.get_all_connections()
+	return floor_def.connections
+
+## Reports whether a portal may be placed at a global world cell on
+## the ACTIVE floor leading to destination_floor_id. Cell rules come
+## from portal_cell_status; the destination must be another registered
+## floor.
+func can_place_portal(world_cell: Vector2i, destination_floor_id: StringName) -> Dictionary:
+	if structural_edits_readonly():
+		return {"allowed": false, "reason": "Multiplayer client: edits are server-authoritative."}
+	if active_floor == null:
+		return {"allowed": false, "reason": "No active floor."}
+	return _can_place_portal(active_floor, room_world, world_cell, destination_floor_id, null)
+
+func _can_place_portal(floor_def: Floor, world: RoomWorld, world_cell: Vector2i,
+		destination_floor_id: StringName, exclude: FloorPortal) -> Dictionary:
+	var cell_status := _portal_cell_status_for(floor_def, world, world_cell, exclude)
+	if not bool(cell_status.get("free", false)):
+		return {"allowed": false, "reason": cell_status.get("reason", "refused")}
+	if destination_floor_id == &"":
+		return {"allowed": false, "reason": "No destination floor selected."}
+	if destination_floor_id == floor_def.floor_id:
+		return {"allowed": false, "reason": "A portal cannot target its own floor."}
+	if get_floor(destination_floor_id) == null:
+		return {"allowed": false, "reason": "Destination floor '%s' is not registered." % destination_floor_id}
+	return {"allowed": true, "reason": ""}
+
+## Places a portal at a global world cell on the active floor. The id
+## derives deterministically from the cell — unique because one portal
+## per cell is enforced. Persists layout.json and marks the floor dirty.
+func place_portal(world_cell: Vector2i, destination_floor_id: StringName) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("place_portal")
+		return false
+	if active_floor == null:
+		push_error("FloorManager.place_portal requires an active floor.")
+		return false
+	var verdict := can_place_portal(world_cell, destination_floor_id)
+	if not bool(verdict.get("allowed", false)):
+		push_error("FloorManager.place_portal: %s" % verdict.get("reason", "refused"))
+		return false
+	return _place_portal(active_floor, world_cell, destination_floor_id, true)
+
+## Floor-scoped counterpart for runtime worlds (multiplayer). Server
+## path: validates, mutates, persists, marks dirty.
+func place_portal_on_floor(floor_id: StringName, world_cell: Vector2i,
+		destination_floor_id: StringName) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("place_portal_on_floor")
+		return false
+	var floor_def := get_floor(floor_id)
+	if floor_def == null:
+		push_error("FloorManager.place_portal_on_floor: unknown floor '%s'." % floor_id)
+		return false
+	var verdict := _can_place_portal(floor_def, world_for_floor(floor_id),
+		world_cell, destination_floor_id, null)
+	if not bool(verdict.get("allowed", false)):
+		push_error("FloorManager.place_portal_on_floor: %s" % verdict.get("reason", "refused"))
+		return false
+	return _place_portal(floor_def, world_cell, destination_floor_id, true)
+
+func _place_portal(floor_def: Floor, world_cell: Vector2i,
+		destination_floor_id: StringName, persist: bool) -> bool:
+	var spec := spawn_cell_room(floor_def, world_cell)
+	if spec == null:
+		return false
+	var portal := FloorPortal.new()
+	portal.portal_id = StringName("portal_%d_%d" % [world_cell.x, world_cell.y])
+	portal.room_id = spec.room_id
+	portal.world_cell = world_cell
+	portal.destination_floor_id = destination_floor_id
+	floor_def.portals.append(portal)
+	if persist:
+		_persist_room_layout(floor_def)
+		mark_floor_dirty(floor_def.floor_id)
+	return true
+
+## Reports whether the portal at a global world cell may be removed.
+func can_remove_portal(world_cell: Vector2i) -> Dictionary:
+	if structural_edits_readonly():
+		return {"allowed": false, "reason": "Multiplayer client: edits are server-authoritative."}
+	if active_floor == null:
+		return {"allowed": false, "reason": "No active floor."}
+	if portal_at(world_cell) == null:
+		return {"allowed": false, "reason": "No portal on that cell."}
+	return {"allowed": true, "reason": ""}
+
+## Removes the portal at a global world cell from the active floor.
+## Persists layout.json and marks the floor dirty.
+func remove_portal(world_cell: Vector2i) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("remove_portal")
+		return false
+	if active_floor == null:
+		push_error("FloorManager.remove_portal requires an active floor.")
+		return false
+	var verdict := can_remove_portal(world_cell)
+	if not bool(verdict.get("allowed", false)):
+		push_error("FloorManager.remove_portal: %s" % verdict.get("reason", "refused"))
+		return false
+	return _remove_portal(active_floor, world_cell, true)
+
+## Floor-scoped counterpart for runtime worlds (multiplayer). Server
+## path: validates, mutates, persists, marks dirty.
+func remove_portal_on_floor(floor_id: StringName, world_cell: Vector2i) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("remove_portal_on_floor")
+		return false
+	var floor_def := get_floor(floor_id)
+	if floor_def == null:
+		push_error("FloorManager.remove_portal_on_floor: unknown floor '%s'." % floor_id)
+		return false
+	if portal_at_on_floor(floor_id, world_cell) == null:
+		push_error("FloorManager.remove_portal_on_floor: no portal on that cell.")
+		return false
+	return _remove_portal(floor_def, world_cell, true)
+
+func _remove_portal(floor_def: Floor, world_cell: Vector2i, persist: bool) -> bool:
+	for i in range(floor_def.portals.size() - 1, -1, -1):
+		var portal: FloorPortal = floor_def.portals[i]
+		if portal != null and portal.world_cell == world_cell:
+			floor_def.portals.remove_at(i)
+			if persist:
+				_persist_room_layout(floor_def)
+				mark_floor_dirty(floor_def.floor_id)
+			return true
+	return false
+
+## Retargets the portal at a global world cell to a new destination
+## floor. The portal keeps its id/cell/room — only the destination
+## changes. Validates the new destination like a fresh placement.
+func update_portal_destination(world_cell: Vector2i, destination_floor_id: StringName) -> bool:
+	if structural_edits_readonly():
+		_refuse_readonly("update_portal_destination")
+		return false
+	if active_floor == null:
+		push_error("FloorManager.update_portal_destination requires an active floor.")
+		return false
+	var portal := portal_at(world_cell)
+	if portal == null:
+		push_error("FloorManager.update_portal_destination: no portal on that cell.")
+		return false
+	if portal.destination_floor_id == destination_floor_id:
+		return true
+	var verdict := _can_place_portal(active_floor, room_world, world_cell,
+		destination_floor_id, portal)
+	if not bool(verdict.get("allowed", false)):
+		push_error("FloorManager.update_portal_destination: %s" % verdict.get("reason", "refused"))
+		return false
+	portal.destination_floor_id = destination_floor_id
+	_persist_room_layout(active_floor)
+	mark_floor_dirty(active_floor.floor_id)
+	return true
 
 ## ------------------------------------------------------------------
 ## Replica apply (multiplayer clients): unguarded, persistence-free
@@ -1261,6 +1856,28 @@ func _apply_layout_entries(floor_def: Floor, data: Dictionary) -> void:
 	var spawn_raw: Variant = data.get("spawn_position")
 	if spawn_raw is Array and spawn_raw.size() == 2:
 		floor_def.spawn_position = _layout_vec2i(spawn_raw)
+	var spawn_points_raw: Variant = data.get("spawn_points")
+	if spawn_points_raw is Array:
+		var cells: Array[Vector2i] = []
+		for raw_cell in spawn_points_raw:
+			if raw_cell is Array and (raw_cell as Array).size() == 2:
+				cells.append(_layout_vec2i(raw_cell))
+		floor_def.spawn_points = cells
+	# Portals ride the same layout payload. Entries that fail to parse
+	# are skipped with a warning — a malformed portal never blocks the
+	# floor's room layout. Missing key (older saves) leaves resource-
+	# authored portals untouched; an explicit array replaces them.
+	var portals_raw: Variant = data.get("portals")
+	if portals_raw is Array:
+		floor_def.portals.clear()
+		for raw_portal in portals_raw:
+			var portal := FloorSaveSystem.portal_from_dict(raw_portal)
+			if portal == null:
+				push_warning("FloorManager: skipping malformed portal entry in floor '%s'." % floor_def.floor_id)
+				continue
+			floor_def.portals.append(portal)
+	_normalize_spawn_points(floor_def)
+	_sync_entry_from_spawns(floor_def)
 	print("FloorManager: floor '%s' layout override applied (%d room spec(s))." % [
 		floor_def.floor_id, specs.size()])
 
@@ -1326,28 +1943,43 @@ func _on_world_content_changed(world: RoomWorld) -> void:
 	if floor_id is StringName:
 		mark_floor_dirty(floor_id)
 
-## Places the player on the floor's entry room after a load/materialize.
-## When the floor's saved player state was already applied by
-## RoomWorld.load_all_rooms this is a no-op; otherwise the player is
-## bound to the entry room (or the first room as a fallback) at the
-## floor's spawn position, clamped into the room's bounds.
-func _ensure_player_placement(world: RoomWorld, floor_def: Floor) -> void:
-	var player := _player()
-	if player == null:
-		return
-	var current: Room = null
-	if player.room != null and is_instance_valid(player.room):
-		current = world.get_room(player.room.room_coordinates)
-	if current != null and current == player.room and player.room.is_inside_tree():
-		return
+## Picks where a player entering this floor should stand: a RANDOM
+## spawn point (Floor.spawn_points — the floor's natural entries) when
+## the list resolves to a live room, else the legacy entry_room_id/
+## spawn_position fallback. Candidates are shuffled so every spawn
+## point is equally likely and one stale point cannot block the rest.
+## Returns {"room": Room, "cell": Vector2i} (cell is room-local) or {}
+## when the floor has no usable room. Shared by _ensure_player_
+## placement (single-player/snapshot) and the multiplayer transition
+## path so both sides agree on the rule — the actual pick differs per
+## call, which is the point: each player gets their own random entry.
+func spawn_placement_for(floor_def: Floor, world: RoomWorld) -> Dictionary:
+	if floor_def == null or world == null:
+		return {}
+	# duplicate(): floor_spawn_points may return the floor's live
+	# array — shuffling it would reorder spawn_points[0] and break
+	# the entry_room_id/spawn_position mirror.
+	var candidates := floor_spawn_points(floor_def).duplicate()
+	candidates.shuffle()
+	for cell in candidates:
+		var spec := spawn_cell_room(floor_def, cell)
+		if spec == null:
+			continue
+		var room := world.get_room(spec.room_id)
+		if room == null:
+			continue
+		var local: Vector2i = cell - spec.global_origin
+		if not room.has_cell(local):
+			local = _nearest_room_cell(room, local)
+		return {"room": room, "cell": local}
+	# Legacy fallback: entry room + spawn_position.
 	var entry := world.get_room(floor_def.entry_room_id)
 	if entry == null:
 		var rooms := world.registry.get_rooms()
 		if not rooms.is_empty():
 			entry = rooms[0]
 	if entry == null:
-		push_warning("FloorManager: floor '%s' has no rooms; player left unplaced." % floor_def.floor_id)
-		return
+		return {}
 	var spawn := floor_def.spawn_position
 	if spawn.x < 0 or spawn.y < 0 or spawn.x >= entry.size.x or spawn.y >= entry.size.y:
 		spawn = Vector2i(entry.size.x >> 1, entry.size.y >> 1)
@@ -1356,12 +1988,38 @@ func _ensure_player_placement(world: RoomWorld, floor_def: Floor) -> void:
 	# lands somewhere they cannot move.
 	if not entry.has_cell(spawn):
 		spawn = _nearest_room_cell(entry, spawn)
+	return {"room": entry, "cell": spawn}
+
+## Places the player on the floor after a load/materialize. Floor
+## entries ALWAYS spawn at a random spawn point
+## (spawn_placement_for) — saved player_state no longer resumes a
+## previous position; spawn points are the only entries.
+func _ensure_player_placement(world: RoomWorld, floor_def: Floor) -> void:
+	var player := _player()
+	if player == null:
+		return
+	var placement := spawn_placement_for(floor_def, world)
+	if placement.is_empty():
+		push_warning("FloorManager: floor '%s' has no rooms; player left unplaced." % floor_def.floor_id)
+		return
+	var entry: Room = placement["room"]
+	var spawn: Vector2i = placement["cell"]
 	player.room_world = world
 	player.room = entry
 	player.block_layer = entry.block_layer
 	player.room_size = entry.size
 	player.place_at(spawn, player.stand_elevation_at(spawn))
 	world.set_primary_room(entry.room_coordinates)
+
+## Public entry point for spawn placement: WorldBootstrap calls this
+## after spawning the player node because load_floor ran before the
+## player existed. Defaults to the active floor and bound world.
+func place_player_at_spawn(floor_def: Floor = null, world: RoomWorld = null) -> void:
+	var def := floor_def if floor_def != null else active_floor
+	var target := world if world != null else room_world
+	if def == null or target == null:
+		return
+	_ensure_player_placement(target, def)
 
 ## Closest cell (by squared distance) present in the room's footprint
 ## to the given local coordinate. Falls back to (0,0)-scan order.

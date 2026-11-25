@@ -448,6 +448,83 @@ func _run_b3_checks(room: Room, no_players: Array) -> void:
 	_expect(mm._build_op_max.has(8), "other peer's dedup state lost")
 	mm.queue_free()
 
+	# --- build-result queueing around snapshots/transitions ------------------
+	# Accepted broadcasts that arrive while world_synced is false or a
+	# floor transition is pending must queue — applying them early would
+	# hit the wrong replica (or be dropped by the floor filter and lost).
+	var wb := WorldBootstrap.new()
+	wb.room_world = _world
+	var client_mm := MultiplayerManager.new()
+	client_mm.name = "ClientMM"
+	client_mm.mode = MultiplayerManager.Mode.CLIENT
+	client_mm._world = wb
+	client_mm._connected = true
+	client_mm.world_synced = true
+	client_mm._my_floor_id = &"b1_floor"
+	root.add_child(client_mm)
+	# Three guaranteed-free local cells inside the 8x8 room.
+	var free_cells: Array[Vector2i] = []
+	for y in range(8):
+		for x in range(8):
+			var c := Vector2i(x, y)
+			if room.block_layer.get_blocks_at(c).is_empty():
+				free_cells.append(c)
+			if free_cells.size() == 3:
+				break
+		if free_cells.size() == 3:
+			break
+	_expect(free_cells.size() == 3, "not enough free cells for queue test")
+	if free_cells.size() < 3:
+		client_mm.queue_free()
+		wb.queue_free()
+		return
+	var cell_a: Vector2i = free_cells[0]
+	var cell_b: Vector2i = free_cells[1]
+	var cell_c: Vector2i = free_cells[2]
+	var place_payload := {
+		"kind": "place", "floor_id": &"b1_floor", "room_id": Vector2i(0, 0),
+		"cell": cell_a, "category": "block",
+		"object_id": "standard_block", "elevation": 0.0,
+		"rotation": 0, "flip": false}
+	var blocks_before := _block_ids(_world, Vector2i(0, 0)).size()
+	# Mid-transition: queued, not applied.
+	client_mm._transition_pending = true
+	client_mm._handle_build_result(900, true, &"", place_payload)
+	_expect(client_mm._pending_build_ops.size() == 1,
+		"transition-time build result not queued")
+	_expect(_block_ids(_world, Vector2i(0, 0)).size() == blocks_before,
+		"queued build result applied during transition")
+	# Pre-sync: also queued (different cell — same-cell same-elevation
+	# would legitimately fail can_place after the first applies).
+	var place_payload_2 := place_payload.duplicate()
+	place_payload_2["cell"] = cell_b
+	client_mm._transition_pending = false
+	client_mm.world_synced = false
+	client_mm._handle_build_result(901, true, &"", place_payload_2)
+	_expect(client_mm._pending_build_ops.size() == 2,
+		"pre-sync build result not queued")
+	# Flush after sync on the matching floor: both apply in order.
+	client_mm.world_synced = true
+	client_mm._flush_pending_build_ops()
+	_expect(client_mm._pending_build_ops.is_empty(), "build queue not flushed")
+	_expect(not room.block_layer.get_blocks_at(cell_a).is_empty(),
+		"queued transition-time op never applied")
+	_expect(not room.block_layer.get_blocks_at(cell_b).is_empty(),
+		"queued pre-sync op never applied")
+	# Other-floor payload queued mid-transition is dropped at flush.
+	var other_payload := place_payload.duplicate()
+	other_payload["floor_id"] = &"other_floor"
+	other_payload["cell"] = cell_c
+	client_mm._transition_pending = true
+	client_mm._handle_build_result(902, true, &"", other_payload)
+	client_mm._transition_pending = false
+	client_mm._flush_pending_build_ops()
+	_expect(client_mm._pending_build_ops.is_empty(), "other-floor op not flushed")
+	_expect(room.block_layer.get_blocks_at(cell_c).is_empty(),
+		"other-floor build op applied locally")
+	client_mm.queue_free()
+	wb.queue_free()
+
 	# --- malformed request fields reject safely ------------------------------
 	var malformed := [
 		{"room_id": [], "cell": Vector2i(1, 1), "category": &"block",

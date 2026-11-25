@@ -43,6 +43,10 @@ TESTS=(
     StructuralOpsSmokeTest
     FloorOpsSmokeTest
     ServerPersistenceSmokeTest
+    SpawnPointSmokeTest
+    PortalSmokeTest
+    PortalTransitionSmokeTest
+    TransitionOverlaySmokeTest
 )
 
 if [ -n "$FILTER" ]; then

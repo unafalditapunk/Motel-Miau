@@ -197,18 +197,30 @@ func _run_checks() -> void:
 	_mm._peer_floor[8] = &"motel"
 
 	# --- visit + leave: runtime world lifecycle -------------------------
+	# The server-side in-flight transition guard stays held until the
+	# client acks the travel snapshot; these simulated transitions
+	# never ack, so release the guard to simulate completed ones.
+	_mm._transition_inflight.clear()
 	_mm._handle_floor_transition(8, &"mp_floor")
 	var mp_world: RoomWorld = fm.world_for_floor(&"mp_floor")
 	_expect(mp_world != null and mp_world != _world.room_world,
 		"mp_floor runtime world not materialized")
 	_expect(fm.runtime_worlds.has(&"mp_floor"), "runtime_worlds missing mp_floor")
 	# Peer 8 leaves; the runtime world is RETAINED (safe policy).
+	# The server-side in-flight transition guard stays held until the
+	# client acks the travel snapshot; these simulated transitions
+	# never ack, so release the guard to simulate completed ones.
+	_mm._transition_inflight.clear()
 	_mm._handle_floor_transition(8, &"motel")
 	_expect(fm.runtime_worlds.has(&"mp_floor"),
 		"runtime world freed on depart — retention policy changed")
 	# Peer 7 makes a REAL trip to village so motel is genuinely
 	# unoccupied when the delete arrives (occupancy tracks _peer_floor,
 	# which only real transitions keep honest).
+	# The server-side in-flight transition guard stays held until the
+	# client acks the travel snapshot; these simulated transitions
+	# never ack, so release the guard to simulate completed ones.
+	_mm._transition_inflight.clear()
 	_mm._handle_floor_transition(7, &"village")
 	_expect(_mm._peer_floor[7] == &"village", "peer 7 did not reach village")
 	# Now unoccupied: delete succeeds, world torn down, save dir gone.
@@ -305,6 +317,10 @@ func _run_checks() -> void:
 	# Peer 8 visits forest (runtime world); peer 7 is already on
 	# village. Motel is active with no peer bodies — delete must
 	# succeed via the switch_floor + migrate path.
+	# The server-side in-flight transition guard stays held until the
+	# client acks the travel snapshot; these simulated transitions
+	# never ack, so release the guard to simulate completed ones.
+	_mm._transition_inflight.clear()
 	_mm._handle_floor_transition(8, &"forest")
 	_expect(_mm._peer_floor[8] == &"forest", "peer 8 did not reach forest")
 	var forest_world_before: RoomWorld = fm.world_for_floor(&"forest")
@@ -335,6 +351,10 @@ func _run_checks() -> void:
 	_expect(mig_floor != &"", "no non-active floor available for migration test")
 	if mig_floor == &"":
 		return
+	# The server-side in-flight transition guard stays held until the
+	# client acks the travel snapshot; these simulated transitions
+	# never ack, so release the guard to simulate completed ones.
+	_mm._transition_inflight.clear()
 	_mm._handle_floor_transition(8, mig_floor)
 	var mig_world: RoomWorld = fm.runtime_worlds.get(mig_floor)
 	_expect(mig_world != null and body_b.room_world == mig_world,

@@ -8,6 +8,7 @@ extends Node2D
 
 const DEBUG_HUD_SCRIPT := preload("res://Scripts/Debug/DebugHud.gd")
 const FLOOR_PANEL_SCRIPT := preload("res://Scripts/UI/FloorPanel.gd")
+const TRANSITION_OVERLAY_SCRIPT := preload("res://Scripts/UI/TransitionOverlay.gd")
 const SAVE_KEY := KEY_F5
 const LOAD_KEY := KEY_F6
 const QUARANTINE_KEY := KEY_F10
@@ -98,19 +99,22 @@ func _ready() -> void:
 		return
 	_configure_room_layers()
 	_spawn_player()
-	# load_floor ran before the player existed, so saved player state was
-	# skipped; apply it now that the player node is spawned. Net clients
-	# skip this: their position comes from the server spawn handshake,
-	# and local player_state.json is stale replica data.
+	# load_floor ran before the player existed, so spawn placement was
+	# skipped; place the player at a random spawn point now that the
+	# node exists. Saved player_state no longer resumes a position —
+	# spawn points are the only floor entries. Net clients skip this:
+	# their position comes from the server spawn handshake, and local
+	# player_state.json is stale replica data.
 	if floor_ready:
-		if not net_client:
-			room_world.apply_saved_player_state()
+		if not net_client and floor_manager != null:
+			floor_manager.place_player_at_spawn()
 		if player != null and player.room != null and player.room != room:
 			room = player.room
 			_configure_room_layers()
 	_build_debug_hud()
 	_build_floor_panel()
 	_build_floor_editor()
+	_build_transition_overlay()
 	_wire_placement_controller()
 	_setup_multiplayer()
 
@@ -213,6 +217,15 @@ func _build_floor_panel() -> void:
 	_floor_panel = FLOOR_PANEL_SCRIPT.new()
 	_floor_panel.name = "FloorPanel"
 	add_child(_floor_panel)
+
+## Screen-space transition fade: pure presentation, driven by
+## play_transition (single-player) and the net manager's local
+## transition_requested/transition_result signals (multiplayer
+## client). Exists on every peer but only ever animates locally.
+func _build_transition_overlay() -> void:
+	var overlay := TRANSITION_OVERLAY_SCRIPT.new()
+	overlay.name = "TransitionOverlay"
+	add_child(overlay)
 
 ## Creation Mode editor: child of RoomWorld so its _draw() overlay shares
 ## the rooms' world-cell coordinate space.
@@ -330,7 +343,17 @@ func switch_floor(floor_id: StringName) -> bool:
 	# not rebuild its replica from local saves.
 	if _net_client_readonly():
 		return false
-	return floor_manager != null and floor_manager.switch_floor(floor_id)
+	if floor_manager == null:
+		return false
+	# Route through the transition overlay when present: the switch
+	# is deferred until the slide-out clears the screen; true means
+	# the transition started (the result arrives via
+	# transition_completed).
+	var overlay := get_tree().get_first_node_in_group(&"transition_overlay") as TransitionOverlay
+	if overlay != null:
+		return bool(overlay.play_transition(
+			func() -> bool: return floor_manager.switch_floor(floor_id)))
+	return floor_manager.switch_floor(floor_id)
 
 ## Rebinds every room-scoped reference after the active floor changed.
 ## The player node itself survives the switch (FloorManager re-places

@@ -22,7 +22,7 @@ extends Node2D
 enum ViewMode { GRID, ROOMS }
 ## Editing tool: NONE = camera/navigation only, CREATE_ROOM = drag a
 ## rectangle on the global grid to define a new room's bounds.
-enum Tool { NONE, CREATE_ROOM }
+enum Tool { NONE, CREATE_ROOM, SPAWN, PORTAL }
 enum SelectionValidity { VALID, OVERLAP, ISOLATED, DISCONNECTED, INVALID }
 
 const GROUP := &"floor_editor"
@@ -31,6 +31,8 @@ const PANEL_LAYER := 68
 const VIEW_TOGGLE_KEY := KEY_V
 const RESET_VIEW_KEY := KEY_B
 const CREATE_TOOL_KEY := KEY_C
+const SPAWN_TOOL_KEY := KEY_G
+const PORTAL_TOOL_KEY := KEY_H
 const CONFIRM_KEY := KEY_X
 ## Sanity cap per axis; the coordinate space itself stays unbounded.
 const MAX_ROOM_DIMENSION := 1024
@@ -118,6 +120,9 @@ const WARNING_FULL := preload("res://Assets/Sprites/Rooms/full_open_side_warning
 ## Solid fill diamond (room blue, no edges) drawn under every cell of
 ## a placed room so rooms read as filled shapes beneath the edge art.
 const NO_BORDER_ROOM_TEXTURE := preload("res://Assets/Sprites/Rooms/no_border_room_iso.png")
+## Spawn-point marker drawn on each of the floor's spawn cells
+## (Floor.spawn_points — global world cells inside room footprints).
+const SPAWN_TEXTURE := preload("res://Assets/Sprites/Rooms/spawn_cell_iso.png")
 ## Tile palettes: 0 = valid (pending shape), 1 = room (placed),
 ## 2 = blocked (overlap/isolated/disconnected), 3 = warning (invalid).
 const PALETTE_VALID := 0
@@ -215,6 +220,21 @@ var _struct_pending := 0
 ## recenter on the replica room once the broadcast applies it.
 var _pending_create_room_id := Vector2i(-1, -1)
 var _room_panel_room: Room = null
+# Floor portal panel (H tool): place a portal on the cursor cell or
+# inspect/retarget/delete an existing one. _portal_panel_cell is the
+# global world cell being edited; _portal_panel_existing is the
+# FloorPortal there (null = placing a new one); _portal_dest_ids
+# parallels the OptionButton items with floor_ids.
+var _portal_panel_layer: CanvasLayer
+var _portal_panel: PanelContainer
+var _portal_panel_info: Label
+var _portal_panel_status: Label
+var _portal_panel_dest: OptionButton
+var _portal_panel_apply: Button
+var _portal_panel_delete: Button
+var _portal_panel_cell := Vector2i.ZERO
+var _portal_panel_existing: FloorPortal = null
+var _portal_dest_ids: Array[StringName] = []
 
 var _room_world: RoomWorld
 var _grid: IsometricGrid
@@ -241,6 +261,7 @@ func _ready() -> void:
 	_build_hud()
 	_build_panel()
 	_build_room_panel()
+	_build_portal_panel()
 
 func _build_hud() -> void:
 	_hud_layer = CanvasLayer.new()
@@ -382,6 +403,69 @@ func _build_room_panel() -> void:
 	buttons.add_child(close)
 	_room_panel_layer.visible = false
 
+## Floor portal editor panel (H tool): shows the portal cell/room,
+## a destination-floor OptionButton listing every other registered
+## floor by readable name (floor_id kept in _portal_dest_ids), a
+## status line, and Place/Apply + Delete + Close buttons. Same
+## CanvasLayer + PixelUi conventions as the room panel.
+func _build_portal_panel() -> void:
+	_portal_panel_layer = CanvasLayer.new()
+	_portal_panel_layer.name = "PortalPanel"
+	_portal_panel_layer.layer = PANEL_LAYER
+	add_child(_portal_panel_layer)
+	_portal_panel = PanelContainer.new()
+	PixelUi.style_panel(_portal_panel)
+	_portal_panel.set_anchors_preset(Control.PRESET_CENTER)
+	_portal_panel.position = Vector2(-140.0, -80.0)
+	_portal_panel.custom_minimum_size = Vector2(280.0, 0.0)
+	_portal_panel_layer.add_child(_portal_panel)
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override(&"separation", 6)
+	_portal_panel.add_child(box)
+	var title := Label.new()
+	title.text = "Floor Portal"
+	PixelUi.style_label(title, PixelUi.TEXT_COLOR, 12)
+	box.add_child(title)
+	_portal_panel_info = Label.new()
+	PixelUi.style_label(_portal_panel_info, PixelUi.TEXT_COLOR, 10)
+	_portal_panel_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(_portal_panel_info)
+	var dest_row := HBoxContainer.new()
+	dest_row.add_theme_constant_override(&"separation", 6)
+	box.add_child(dest_row)
+	var dest_caption := Label.new()
+	dest_caption.text = "To floor:"
+	PixelUi.style_label(dest_caption, PixelUi.TEXT_COLOR, 10)
+	dest_row.add_child(dest_caption)
+	_portal_panel_dest = OptionButton.new()
+	_portal_panel_dest.custom_minimum_size = Vector2(170.0, 0.0)
+	_portal_panel_dest.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	dest_row.add_child(_portal_panel_dest)
+	_portal_panel_status = Label.new()
+	PixelUi.style_label(_portal_panel_status, Color(1.0, 0.6, 0.4), 10)
+	_portal_panel_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(_portal_panel_status)
+	var buttons := HBoxContainer.new()
+	buttons.alignment = BoxContainer.ALIGNMENT_END
+	buttons.add_theme_constant_override(&"separation", 8)
+	box.add_child(buttons)
+	_portal_panel_apply = Button.new()
+	_portal_panel_apply.text = "Place"
+	PixelUi.style_button(_portal_panel_apply, true)
+	_portal_panel_apply.pressed.connect(_on_portal_apply)
+	buttons.add_child(_portal_panel_apply)
+	_portal_panel_delete = Button.new()
+	_portal_panel_delete.text = "Delete"
+	PixelUi.style_button(_portal_panel_delete, true)
+	_portal_panel_delete.pressed.connect(_on_portal_delete)
+	buttons.add_child(_portal_panel_delete)
+	var close := Button.new()
+	close.text = "Close"
+	PixelUi.style_button(close, true)
+	close.pressed.connect(_close_portal_panel)
+	buttons.add_child(close)
+	_portal_panel_layer.visible = false
+
 func _process(_delta: float) -> void:
 	if not active:
 		return
@@ -423,6 +507,12 @@ func _handle_editor_key(keycode: Key) -> void:
 			_close_room_panel()
 			get_viewport().set_input_as_handled()
 		return
+	# The portal panel owns the keyboard the same way.
+	if _portal_panel_is_open():
+		if keycode == KEY_ESCAPE:
+			_close_portal_panel()
+			get_viewport().set_input_as_handled()
+		return
 	# While the confirmation panel is open it owns the keyboard except
 	# Escape, which cancels back to the selection.
 	if _panel_is_open():
@@ -453,6 +543,12 @@ func _handle_editor_key(keycode: Key) -> void:
 		CREATE_TOOL_KEY:
 			_toggle_create_tool()
 			get_viewport().set_input_as_handled()
+		SPAWN_TOOL_KEY:
+			_toggle_spawn_tool()
+			get_viewport().set_input_as_handled()
+		PORTAL_TOOL_KEY:
+			_toggle_portal_tool()
+			get_viewport().set_input_as_handled()
 		KEY_BACKSPACE:
 			# Undo the last committed section of the pending shape.
 			if not _pending_sections.is_empty():
@@ -481,7 +577,8 @@ func _handle_editor_mouse(mouse_button: InputEventMouseButton) -> void:
 	# and wheel zoom are handled by WorldCamera and never reach a drag.
 	if mouse_button.button_index != MOUSE_BUTTON_LEFT:
 		return
-	if _panel_is_open() or _room_panel_is_open() or view_mode != ViewMode.GRID:
+	if _panel_is_open() or _room_panel_is_open() or _portal_panel_is_open() \
+			or view_mode != ViewMode.GRID:
 		return
 	if mouse_button.pressed:
 		_pressing = cursor_cell_valid
@@ -503,7 +600,12 @@ func _handle_editor_mouse(mouse_button: InputEventMouseButton) -> void:
 			else:
 				_finish_drag()
 		elif _press_cell == cursor_cell:
-			_handle_room_click()
+			if tool == Tool.SPAWN:
+				_handle_spawn_click()
+			elif tool == Tool.PORTAL:
+				_handle_portal_click()
+			else:
+				_handle_room_click()
 		get_viewport().set_input_as_handled()
 
 # ------------------------------------------------------------------
@@ -590,6 +692,7 @@ func exit() -> void:
 	_room_draw_cache.clear()
 	_close_panel()
 	_close_room_panel()
+	_close_portal_panel()
 	cursor_cell_valid = false
 	_restore_world_contents()
 	if _room_world != null:
@@ -628,6 +731,7 @@ func _catalog_panel() -> CatalogPanel:
 func _cycle_view() -> void:
 	view_mode = ViewMode.ROOMS if view_mode == ViewMode.GRID else ViewMode.GRID
 	_close_room_panel()
+	_close_portal_panel()
 	_apply_view_visibility()
 
 func _apply_view_visibility() -> void:
@@ -643,6 +747,7 @@ func _apply_view_visibility() -> void:
 
 func _toggle_create_tool() -> void:
 	_dragging = false
+	_close_portal_panel()
 	if tool == Tool.CREATE_ROOM:
 		tool = Tool.NONE
 		_cancel_pending()
@@ -655,6 +760,205 @@ func _toggle_create_tool() -> void:
 	# visible in GRID view — switch so the drag is actually visible.
 	if view_mode != ViewMode.GRID:
 		_cycle_view()
+
+# ------------------------------------------------------------------
+# Spawn point tool
+# ------------------------------------------------------------------
+## G toggles the spawn tool: LMB on a free in-room cell places a spawn
+## point (max Floor.MAX_SPAWN_POINTS per floor), LMB on an existing
+## spawn cell removes it (min Floor.MIN_SPAWN_POINTS must remain).
+## Spawn points are global world cells — the floor's natural entries.
+func _toggle_spawn_tool() -> void:
+	_close_portal_panel()
+	if tool == Tool.SPAWN:
+		tool = Tool.NONE
+		return
+	if _structural_readonly():
+		_set_notice("Floor edits are sent to the server for approval.")
+	_cancel_pending()
+	tool = Tool.SPAWN
+	# Spawn markers only draw in GRID view — switch like the create tool.
+	if view_mode != ViewMode.GRID:
+		_cycle_view()
+
+# ------------------------------------------------------------------
+# Floor portal tool
+# ------------------------------------------------------------------
+## H toggles the portal tool: LMB on a cell opens the portal panel —
+## place mode on a free in-room cell, edit mode on an existing portal
+## (inspect destination, retarget, delete). Portals are FloorPortal
+## resources on the active floor's Floor.portals — global world cells
+## that transition to another floor through the normal switch path.
+func _toggle_portal_tool() -> void:
+	if tool == Tool.PORTAL:
+		tool = Tool.NONE
+		_close_portal_panel()
+		return
+	if _structural_readonly():
+		_set_notice("Floor edits are sent to the server for approval.")
+	tool = Tool.PORTAL
+	# Portal markers only draw in GRID view — switch like the others.
+	if view_mode != ViewMode.GRID:
+		_cycle_view()
+
+## LMB press+release on the same cell while the portal tool is active:
+## opens the portal panel for that cell — edit mode when a portal
+## already sits there, place mode otherwise. Multiplayer clients get a
+## notice instead: portal editing has no structural op in P1.
+func _handle_portal_click() -> void:
+	var floor_manager := _floor_manager()
+	if floor_manager == null or floor_manager.active_floor == null:
+		_set_notice("No active floor — portals require one.")
+		return
+	if _structural_readonly():
+		_set_notice("Portal editing is not available to multiplayer clients yet.")
+		return
+	_open_portal_panel(cursor_cell)
+
+func _portal_panel_is_open() -> bool:
+	return _portal_panel_layer != null and _portal_panel_layer.visible
+
+func _close_portal_panel() -> void:
+	if _portal_panel_layer != null:
+		_portal_panel_layer.visible = false
+	_portal_panel_existing = null
+	_portal_panel_cell = Vector2i.ZERO
+
+## Opens the portal panel for a global world cell. existing portals
+## open in edit mode (current destination preselected, Delete shown);
+## free cells open in place mode. The destination list contains every
+## registered floor except the active one — same-floor portals are
+## refused by FloorManager validation.
+func _open_portal_panel(world_cell: Vector2i) -> void:
+	if _portal_panel == null:
+		return
+	var floor_manager := _floor_manager()
+	if floor_manager == null or floor_manager.active_floor == null:
+		_set_notice("No active floor — portals require one.")
+		return
+	_portal_panel_cell = world_cell
+	_portal_panel_existing = floor_manager.portal_at(world_cell)
+	_portal_dest_ids.clear()
+	_portal_panel_dest.clear()
+	for floor_def in floor_manager.floors:
+		if floor_def == null or floor_def == floor_manager.active_floor:
+			continue
+		var label := floor_def.display_name if not floor_def.display_name.is_empty() \
+			else String(floor_def.floor_id)
+		_portal_panel_dest.add_item("%s  [%s]" % [label, floor_def.floor_id])
+		_portal_dest_ids.append(floor_def.floor_id)
+	# Preselect the current destination when editing; a deleted/stale
+	# destination simply selects nothing and the user picks a new one.
+	var select_index := -1
+	if _portal_panel_existing != null:
+		select_index = _portal_dest_ids.find(_portal_panel_existing.destination_floor_id)
+	if select_index < 0 and not _portal_dest_ids.is_empty():
+		select_index = 0
+	if select_index >= 0:
+		_portal_panel_dest.select(select_index)
+	_portal_panel_info.text = "Cell (%d, %d)" % [world_cell.x, world_cell.y]
+	if _portal_panel_existing != null:
+		_portal_panel_info.text += "   Room (%d, %d)   Portal %s" % [
+			_portal_panel_existing.room_id.x, _portal_panel_existing.room_id.y,
+			_portal_panel_existing.portal_id]
+	else:
+		_portal_panel_info.text += "   New portal"
+	_portal_panel_apply.text = "Apply" if _portal_panel_existing != null else "Place"
+	_portal_panel_delete.visible = _portal_panel_existing != null
+	_portal_panel_apply.disabled = false
+	_portal_panel_status.text = ""
+	if _portal_panel_existing == null:
+		# Cell-level problems (outside a room, occupied, interactive
+		# connection) are known before a destination is picked — show
+		# the reason and disable Place instead of failing at apply.
+		var status := floor_manager.portal_cell_status(world_cell)
+		if not bool(status.get("free", false)):
+			_portal_panel_status.text = str(status.get("reason", "invalid cell"))
+			_portal_panel_apply.disabled = true
+	_portal_panel_layer.visible = true
+
+func _selected_portal_dest() -> StringName:
+	var index := _portal_panel_dest.selected
+	if index < 0 or index >= _portal_dest_ids.size():
+		return &""
+	return _portal_dest_ids[index]
+
+## Place or retarget: routes through the FloorManager portal APIs —
+## the panel never touches floor_def.portals directly.
+func _on_portal_apply() -> void:
+	var floor_manager := _floor_manager()
+	if floor_manager == null or floor_manager.active_floor == null:
+		_portal_panel_status.text = "No active floor."
+		return
+	var dest := _selected_portal_dest()
+	if dest == &"":
+		_portal_panel_status.text = "Select a destination floor."
+		return
+	var ok := false
+	if _portal_panel_existing != null:
+		ok = floor_manager.update_portal_destination(_portal_panel_cell, dest)
+	else:
+		ok = floor_manager.place_portal(_portal_panel_cell, dest)
+	if ok:
+		_set_notice("Portal %s -> %s." % [
+			"updated" if _portal_panel_existing != null else "placed", dest])
+		_close_portal_panel()
+	else:
+		# The mutator already pushed the specific reason; surface a
+		# generic refusal without duplicating its error text.
+		_portal_panel_status.text = "Portal refused — see console for the reason."
+
+func _on_portal_delete() -> void:
+	var floor_manager := _floor_manager()
+	if floor_manager == null or _portal_panel_existing == null:
+		_close_portal_panel()
+		return
+	if floor_manager.remove_portal(_portal_panel_cell):
+		_set_notice("Portal removed at (%d, %d)." % [_portal_panel_cell.x, _portal_panel_cell.y])
+		_close_portal_panel()
+	else:
+		_portal_panel_status.text = "Delete failed — see console for the reason."
+
+## The floor's spawn cells for the active floor (empty without one).
+func _active_spawn_cells() -> Array[Vector2i]:
+	var floor_manager := _floor_manager()
+	if floor_manager == null or floor_manager.active_floor == null:
+		return []
+	return floor_manager.floor_spawn_points(floor_manager.active_floor)
+
+## LMB press+release on the same cell while the spawn tool is active:
+## removes the spawn point there when one exists, otherwise places one.
+func _handle_spawn_click() -> void:
+	var floor_manager := _floor_manager()
+	if floor_manager == null or floor_manager.active_floor == null:
+		_set_notice("No active floor — spawn points require one.")
+		return
+	var has_spawn := _active_spawn_cells().has(cursor_cell)
+	if _structural_readonly():
+		# Clients request the change; the broadcast applies it to the
+		# replica and _on_struct_result reports the verdict.
+		var mgr := _struct_manager()
+		if mgr != null and mgr.request_struct_spawn(cursor_cell, not has_spawn):
+			_struct_pending += 1
+			_set_notice("Spawn %s requested — waiting for server…" % (
+				"removal" if has_spawn else "placement"))
+		else:
+			_set_notice("Not connected — cannot request spawn change.")
+		return
+	# Check the verdict first: refused clicks are routine user input,
+	# not errors — they must not reach the mutator's push_error path.
+	var verdict := floor_manager.can_remove_spawn_point(cursor_cell) \
+		if has_spawn else floor_manager.can_place_spawn_point(cursor_cell)
+	if not bool(verdict.get("allowed", false)):
+		_set_notice("Spawn refused: %s" % str(verdict.get("reason", "unknown")))
+		return
+	var ok := floor_manager.remove_spawn_point(cursor_cell) \
+		if has_spawn else floor_manager.place_spawn_point(cursor_cell)
+	if ok:
+		_set_notice("Spawn point %s at (%d, %d)." % [
+			"removed" if has_spawn else "placed", cursor_cell.x, cursor_cell.y])
+	else:
+		_set_notice("Spawn refused: %s" % str(verdict.get("reason", "unknown")))
 
 ## Union bounding box of the pending shape, or an empty rect.
 func _pending_bounds() -> Rect2i:
@@ -1117,6 +1421,9 @@ func _on_struct_result(_op_id: int, accepted: bool, reason: StringName,
 		&"visibility":
 			_sync_room_panel_flags()
 			_set_notice("Visibility updated.")
+		&"spawn":
+			_set_notice("Spawn point %s." % (
+				"placed" if bool(payload.get("place", true)) else "removed"))
 		_:
 			_set_notice("Structural change applied: %s" % str(payload.get("op", "?")))
 
@@ -1227,8 +1534,22 @@ func _update_hud() -> void:
 				section_count, rect.size.x, rect.size.y, rect.position.x, rect.position.y])
 			if not _dragging and not _panel_is_open():
 				lines.append("Press [X] to place it, RMB/Esc to cancel")
+	elif tool == Tool.SPAWN:
+		var spawns := _active_spawn_cells()
+		lines.append("[G] spawn tool  LMB: %s spawn  (%d/%d placed)" % [
+			"remove" if spawns.has(cursor_cell) else "place",
+			spawns.size(), Floor.MAX_SPAWN_POINTS])
+	elif tool == Tool.PORTAL:
+		var floor_manager := _floor_manager()
+		var hovered: FloorPortal = null
+		if floor_manager != null and floor_manager.active_floor != null:
+			hovered = floor_manager.portal_at(cursor_cell)
+		lines.append("[H] portal tool  LMB: %s" % (
+			"edit portal" if hovered != null else "place portal"))
+		if hovered != null:
+			lines.append("Portal → " + _portal_dest_label(hovered.destination_floor_id))
 	else:
-		lines.append("[C] create room tool")
+		lines.append("[C] create room tool  [G] spawn point tool  [H] floor portal tool")
 	if _structural_readonly():
 		lines.append("MULTIPLAYER — edits are server-authoritative")
 		if _struct_pending > 0:
@@ -1254,6 +1575,8 @@ func _draw() -> void:
 	_draw_grid_lines(cell_range)
 	_draw_room_bounds()
 	_draw_selection_preview()
+	_draw_spawn_points()
+	_draw_portals()
 	_draw_cursor_cell()
 
 ## World-cell range covering the camera's visible rect, padded by one
@@ -1601,6 +1924,94 @@ func _hover_texture_for_cursor() -> Texture2D:
 	if _room_world != null and _room_world.get_room_at_world_cell(cursor_cell) != null:
 		return HOVER_BLOCKED_TEXTURE
 	return HOVER_POSITIVE_TEXTURE
+
+## Spawn-point markers: the floor's spawn cells (Floor.spawn_points,
+## global world cells) drawn with the spawn sprite. While the spawn
+## tool is active the cursor cell gets a ghost preview — green when
+## the click would place, dimmed when it would remove, red when the
+## action is refused.
+func _draw_spawn_points() -> void:
+	if SPAWN_TEXTURE == null:
+		return
+	var half := Vector2(SPAWN_TEXTURE.get_size()) * 0.5
+	for cell in _active_spawn_cells():
+		var marker_center := _grid.grid_to_screen_position(Vector2(cell), 0.0)
+		draw_texture(SPAWN_TEXTURE, marker_center - half)
+	if tool != Tool.SPAWN or not cursor_cell_valid:
+		return
+	var ghost_center := _grid.grid_to_screen_position(Vector2(cursor_cell), 0.0)
+	if _active_spawn_cells().has(cursor_cell):
+		draw_texture(SPAWN_TEXTURE, ghost_center - half, Color(1.0, 1.0, 1.0, 0.45))
+		return
+	var tint := Color(1.0, 1.0, 1.0, 0.6)
+	if not _structural_readonly():
+		var floor_manager := _floor_manager()
+		var allowed := floor_manager != null \
+			and bool(floor_manager.can_place_spawn_point(cursor_cell).get("allowed", false))
+		tint = Color(0.55, 1.0, 0.6, 0.8) if allowed else Color(1.0, 0.45, 0.4, 0.8)
+	draw_texture(SPAWN_TEXTURE, ghost_center - half, tint)
+
+## Portal markers: every FloorPortal on the active floor draws a
+## purple diamond at its global cell — deliberately distinct from the
+## spawn sprite, room tiles, and connection markers. While the portal
+## tool is active each marker also shows its destination floor name,
+## and the cursor cell gets a ghost preview (green = cell free for a
+## new portal, red = refused, dim = a portal already sits there).
+func _draw_portals() -> void:
+	var floor_manager := _floor_manager()
+	if floor_manager == null or floor_manager.active_floor == null:
+		return
+	var font := ThemeDB.fallback_font
+	for portal in floor_manager.active_floor.portals:
+		if portal == null:
+			continue
+		var center := _grid.grid_to_screen_position(Vector2(portal.world_cell), 0.0)
+		_draw_portal_marker(center, portal, 1.0)
+		if tool == Tool.PORTAL and font != null:
+			var dest_label := _portal_dest_label(portal.destination_floor_id)
+			draw_string(font, center + Vector2(-24.0, 20.0), "→ " + dest_label,
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.85, 0.7, 1.0, 0.9))
+	if tool != Tool.PORTAL or not cursor_cell_valid:
+		return
+	var ghost_center := _grid.grid_to_screen_position(Vector2(cursor_cell), 0.0)
+	var existing := floor_manager.portal_at(cursor_cell)
+	if existing != null:
+		_draw_portal_marker(ghost_center, existing, 0.45)
+		return
+	var status := floor_manager.portal_cell_status(cursor_cell)
+	var tint := Color(0.55, 1.0, 0.6, 0.8) if bool(status.get("free", false)) \
+		else Color(1.0, 0.45, 0.4, 0.8)
+	_draw_portal_diamond(ghost_center, tint)
+
+## One portal marker: filled diamond + outline, sized like the spawn
+## cell sprite so it reads at the same scale. alpha < 1 ghosts it.
+func _draw_portal_marker(center: Vector2, _portal: FloorPortal, alpha: float) -> void:
+	_draw_portal_diamond(center, Color(0.62, 0.35, 0.95, alpha))
+	var font := ThemeDB.fallback_font
+	if font != null:
+		draw_string(font, center + Vector2(-6.0, 4.0), "P",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1.0, 1.0, 1.0, alpha))
+
+func _draw_portal_diamond(center: Vector2, fill: Color) -> void:
+	var r := 9.0
+	var points := PackedVector2Array([
+		center + Vector2(0.0, -r), center + Vector2(r, 0.0),
+		center + Vector2(0.0, r), center + Vector2(-r, 0.0)])
+	draw_colored_polygon(points, fill)
+	draw_polyline(points + PackedVector2Array([points[0]]),
+		Color(1.0, 1.0, 1.0, fill.a * 0.8), 1.5)
+
+## Display label for a destination floor: readable name plus the id
+## in brackets, matching the editor's panel convention.
+func _portal_dest_label(floor_id: StringName) -> String:
+	var floor_manager := _floor_manager()
+	if floor_manager != null:
+		var dest := floor_manager.get_floor(floor_id)
+		if dest != null:
+			var label := dest.display_name if not dest.display_name.is_empty() \
+				else String(dest.floor_id)
+			return "%s [%s]" % [label, dest.floor_id]
+	return String(floor_id)
 
 ## Pending shape preview: the union draws iso room tiles in the
 ## palette matching its validity — green valid, orange blocked

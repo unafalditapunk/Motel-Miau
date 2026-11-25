@@ -29,7 +29,9 @@ FloorPersistenceSmokeTest, FloorPanelSmokeTest,
 FloorManagementSmokeTest, CreationModeSmokeTest,
 WorldSnapshotSmokeTest, BuildOpsSmokeTest,
 StructuralGuardSmokeTest, FloorTransitionSmokeTest,
-StructuralOpsSmokeTest, FloorOpsSmokeTest, ServerPersistenceSmokeTest.
+StructuralOpsSmokeTest, FloorOpsSmokeTest, ServerPersistenceSmokeTest,
+SpawnPointSmokeTest, PortalSmokeTest, PortalTransitionSmokeTest,
+TransitionOverlaySmokeTest.
 Each prints `<NAME>_SMOKE: OK`. Tests that touch the filesystem redirect
 `RoomSaveSystem.save_dir`/`FloorSaveSystem.save_root` to a
 `user://smoke_*` scratch dir so they never write to the real saves.
@@ -41,7 +43,7 @@ Multiplayer exists only when launch args request it (everything after
 
 ```
 Godot --path <project> -- --server [--port=7777] [--saves=<dir>]
-      [--autosave=60] [--shutdown-after=N]
+	  [--autosave=60] [--shutdown-after=N]
 ```
 
 Clients (repeatable, any number):
@@ -56,7 +58,7 @@ debug args: `--autowalk` (headless player pacing), `--dump-world=N`
 (WORLD_DUMP after N s — diff server vs client output to verify
 replication), `--travel=<floor_id>` (repeatable), `--floor-op=
 create:id[:name]|delete:id`, `--build-op=place:x,y:cat:id|remove:x,y`,
-`--struct-op=create:rx,ry:ox,oy:w,h|delete:rx,ry|vis:rx,ry:a,b`.
+`--struct-op=create:rx,ry:ox,oy:w,h|delete:rx,ry|vis:rx,ry:a,b|spawn:x,y:0|1`.
 In-game: F7 floor panel (create/delete/enter floors — clients send
 requests to the server), F3 debug HUD. Phase status and architecture
 details: `MULTIPLAYER_STATUS.md`; deep notes in the multiplayer
@@ -79,8 +81,11 @@ bullets below.
   floor-first via `FloorManager.load_floor(startup_floor_id)` — no
   legacy room registration runs; empty `startup_floor_id` keeps the
   legacy single-room bootstrap used by tests. After spawning the player
-  it calls `RoomWorld.apply_saved_player_state()` (floor-scoped via
-  `_with_save_dir`) because `load_floor` ran before the player existed.
+  it calls `FloorManager.place_player_at_spawn()` (floor-scoped via
+  `_with_save_dir`) because `load_floor` ran before the player existed —
+  spawn points are the only floor entries; saved `player_state` no
+  longer resumes a previous position (still written, still used by the
+  legacy non-floor bootstrap).
   `user://floors/` is the authoritative save location; legacy
   `user://saves` files are left untouched (ignored, never deleted).
 - `Room` owns a local cell grid (`size`, `cells`) starting at local (0,0).
@@ -143,7 +148,11 @@ bullets below.
   restored by `load_all_rooms()` after rooms register.
 - `Floor` (`Scripts/World/Floor.gd`, Resource): pure-data floor definition —
   `floor_id`, `display_name`, `entry_room_id`, `spawn_position`,
-  `auto_connect_adjacent`, `rooms` (Array[FloorRoomSpec]), `connections`
+  `spawn_points` (Array[Vector2i] of GLOBAL world cells — the floor's
+  natural entries, min `MIN_SPAWN_POINTS`=1 / max `MAX_SPAWN_POINTS`=4,
+  each inside a room footprint; `spawn_points[0]` mirrors
+  entry_room_id/spawn_position), `auto_connect_adjacent`, `rooms`
+  (Array[FloorRoomSpec]), `connections`
   (Array[RoomConnection]), `metadata`. `FloorRoomSpec` holds one room:
   `room_id` (unique within the floor only), `global_origin`, `size`
   (ZERO defers to room_definition/world default), optional
@@ -168,7 +177,10 @@ bullets below.
   `load_floor(id)`, `has_floor_save(id)`, and `switch_floor(id)` implement
   the fail-safe switch: save outgoing → validate destination (definition
   + manifest; corrupt manifest aborts) → materialize → hydrate → place
-  player (saved state, else entry_room_id/spawn) → emit `floor_switched`.
+  player (ALWAYS a RANDOM spawn point via
+  `spawn_placement_for` — spawn_points shuffled, entry/spawn fallback;
+  saved player_state never wins on floor entries)
+  → emit `floor_switched`.
   Failed loads roll back to the previous floor. `is_floor_dirty()` is
   advisory, fed by `RoomWorld.room_content_changed` (room cells_changed +
   BlockLayer.content_changed). WorldBootstrap delegates F5/F6/autosave to
@@ -253,21 +265,144 @@ bullets below.
   `remove_room_from_active_floor` unregisters runtime connections,
   rewrites `connections.json` immediately, reassigns entry/spawn when
   the entry room is deleted, drops the spec, and persists layout.json.
-  The panel's Delete is two-step: the first press only arms it (button
+  Deleting a room also removes every spawn point inside it — allowed
+  only while the floor keeps `Floor.MIN_SPAWN_POINTS` afterwards
+  (`can_delete_room` refuses otherwise). Spawn points themselves are
+  managed by `FloorManager.place_spawn_point`/`remove_spawn_point`
+  (active floor) and the `*_on_floor` variants (multiplayer runtime
+  worlds): global world cells, must lie inside a room's footprint
+  (cell-exact for shaped rooms), max 4 per floor, min 1 always kept;
+  placing/removing resyncs entry_room_id/spawn_position to
+  spawn_points[0] and persists layout.json. Floors registered without
+  an explicit list derive one point from entry/spawn
+  (`_normalize_spawn_points`); `spawn_cell_room(cell)` resolves the
+  containing spec. Floor entry uses `FloorManager.spawn_placement_for`:
+  a random spawn point's room+local cell (shuffled candidates, legacy
+  entry/spawn fallback) — used by `_ensure_player_placement` and the
+  multiplayer `_handle_floor_transition` (server picks per player and
+  ships it in snapshot["spawn"]). Every floor entry — F7 travel, boot,
+  MP join (`_spawn_body` also picks via `spawn_placement_for` and the
+  welcome RPC propagates it) — lands on a random spawn point; saved
+  player_state never resumes a position on floor paths. The
+  panel's Delete is two-step: the first press only arms it (button
   becomes "Confirm", status prompts), the second press deletes; the arm
   resets whenever the panel closes or another room is inspected.
+- Spawn point tool: G toggles it in GRID view (like C for Create
+  Room). LMB press+release on a cell places a spawn point there when
+  the cell is inside a room and the floor is below
+  `Floor.MAX_SPAWN_POINTS`; clicking an existing spawn cell removes it
+  while more than `Floor.MIN_SPAWN_POINTS` remain. Spawn cells draw
+  `spawn_cell_iso.png` markers plus a tinted cursor ghost (green =
+  place allowed, dimmed = would remove, red = refused; neutral on
+  multiplayer clients since the verdict is server-side). On clients
+  the click sends a `spawn` structural op
+  (`request_struct_spawn` -> `_handle_struct_spawn` -> broadcast ->
+  `replica_apply_spawn`) instead of mutating locally. HUD shows the
+  tool hint and `n/4` count.
+- Floor portals (Phase P1): `FloorPortal` resources on
+  `Floor.portals` link one GLOBAL world cell to another floor —
+  independent from `RoomConnection` (which stays intra-floor).
+  Fields: `portal_id` (deterministic `portal_x_y` from the cell),
+  `room_id`, `world_cell`, `destination_floor_id` (no spawn selection
+  yet — arrivals use the normal random spawn). Managed by
+  `FloorManager.place_portal`/`remove_portal`/
+  `update_portal_destination` (active floor) and the `*_on_floor`
+  variants (runtime worlds): cell must be inside a room footprint,
+  free of other portals, and NOT covered by an interactive
+  RoomConnection (`portal_cell_status`/`can_place_portal` verdicts);
+  destination must be another registered floor — same-floor and
+  unknown destinations refused. Portals persist inside layout.json
+  (and floor_def.json/snapshots via `layout_data`) — one
+  authoritative representation, malformed entries skipped with a
+  warning, missing key = untouched. `delete_floor` prunes portals on
+  other floors targeting it (persisting each affected layout);
+  room delete drops portals inside the room; `load_floor`/
+  `materialize_runtime_floor` snapshot+restore portals on refused
+  loads like specs/spawns. Trigger: after a successful in-room step,
+  `Player._trigger_floor_portal` looks up `portal_at(world_cell)` on
+  the bound world only (skips readonly/MP-replica worlds and stale
+  destinations), arms `_floor_portal_pending`, and
+  `floor_portal_delay` (0.18s) later calls the normal
+  `switch_floor(destination)` — save outgoing, materialize, random
+  spawn, rollback on failure. Portal cells and interactive
+  connection cells are mutually exclusive by placement rule, so the
+  two trigger paths never compete. Creation Mode H tool (GRID view):
+  LMB opens a panel — place mode on free cells (destination picker
+  lists floors by name, current floor excluded, Place disabled with
+  reason on invalid cells), edit mode on existing portals (retarget
+  or Delete); purple diamond markers + destination labels draw in
+  GRID view. Multiplayer (Phase P2): portal DEFINITIONS reach clients
+  free via WorldSnapshot (`layout_data` -> `apply_layout_data`), but
+  ACTIVATION is server-authoritative — a client steps on a portal
+  cell, `Player._on_floor_portal_delay_elapsed` calls
+  `MultiplayerManager.request_portal_transition(world_cell)` (only the
+  CELL is sent), and `_handle_portal_transition` validates against
+  `_peer_floor` + `portal_at_on_floor` + the body's authoritative
+  `room.world_cell_coordinates(grid_position)` (movement is
+  server-validated via `_rpc_move_request` -> `body.request_move`),
+  derives the destination from the portal itself, then delegates to
+  the shared `_handle_floor_transition` C2 pipeline. Dedicated-server
+  bodies never self-trigger. Server in-flight guard (P2.1):
+  `_transition_inflight[peer_id] = {id, msec}` is acquired at the
+  commit point and held until the client acks the travel snapshot via
+  `_rpc_transition_done` (id-matched through `_release_transition_guard`),
+  the `TRANSITION_INFLIGHT_TIMEOUT_MS` (20s) safety window expires
+  (lost-ack recovery), or the peer disconnects — requests while held
+  reject `busy`; snapshot prep now runs BEFORE any mutation so
+  `snapshot_failed` rejects leave no guard/body/floor changes. Client
+  `transition_timeout` (12s) watchdog releases input + emits
+  `transition_result(false, &"timeout")` via a serial-checked
+  `_on_transition_timeout`; transition_id = the client request serial,
+  echoed in the snapshot's `"transition_id"` — `_complete_travel_snapshot`
+  always applies world+spawn (server committed) but only a matching id
+  completes the pending request, unlocks input and emits success; stale
+  or late snapshots apply silently and still send the done-ack.
+  Visual transitions (Phase P3): `TransitionOverlay`
+  (`Scripts/UI/TransitionOverlay.gd`, CanvasLayer group
+  `transition_overlay`, built by WorldBootstrap) is pure presentation —
+  it never decides transition success. The visual language reuses the
+  room slide animation: `RoomVisuals.slide_all_out()` slides every
+  visible room down/off, `slide_all_in()` slides the destination
+  floor's rooms in from above, `slide_all_home()` snaps bulk-exited
+  rooms back on failure (tracked in `_bulk_exit_rooms`). The entity
+  layer is hidden for the duration so the player/avatars don't float
+  on the vacated floor. Single-player `play_transition(callable)` is
+  DEFERRED: slide-out plays, then the callable runs once the screen
+  has cleared, then slide-in — the result arrives via the
+  `transition_completed(success)` signal (play_transition returns
+  true = started; with `room_slide_duration == 0` or no visible rooms
+  it falls back to a fully synchronous call returning the real
+  result). The MP client path is signal-driven:
+  `MultiplayerManager.transition_requested` slides out and parks in
+  WAITING (the server round-trip IS the loading wait); the snapshot
+  applies the new world, then `transition_result(accepted, reason)`
+  (id-matched per P2.1) slides in, or slide_all_home restores the old
+  floor on rejection/timeout. `play_transition` refuses while any
+  transition is in progress; the pre-transition `local_input_locked`
+  state is captured once so re-entry can't wedge the lock. Per-player
+  isolation is structural — each client owns one overlay fed only by
+  its local lifecycle signals; nothing is broadcast.
+  `TransitionOverlay.any_active(tree)` lets building UI
+  (BlockPlacementController) refuse input mid-transition;
+  `find_overlay` locates it. `WorldBootstrap.switch_floor`,
+  `FloorPanel` Enter (which also surfaces async failures via
+  `transition_completed`), and the Player portal delay callback all
+  route through it; bare `FloorManager.switch_floor` bypasses the
+  transition (used by tests).
 - Floor layout persistence: `FloorSaveSystem.save_layout/load_layout`
   store room SPECS (id/origin/size/definition path/colors) plus
-  `entry_room_id`/`spawn_position` as `user://floors/<id>/layout.json`
+  `entry_room_id`/`spawn_position`/`spawn_points`/`portals` as
+  `user://floors/<id>/layout.json`
   — res:// .tres files are never modified at runtime.
   `FloorManager._apply_layout_override()` runs at the top of
   `load_floor`/`activate_floor`, replacing `floor_def.rooms` (and
   entry/spawn) in memory; `add_room_to_active_floor()` writes it on
   creation and `save_active_floor()` rewrites it on every F5/switch
-  save. `load_floor` snapshots specs+entry+spawn before the override
-  and restores them when validation refuses the load, so invalid
-  layouts never poison the in-memory Floor. Corrupt/missing layout =
-  ignored with a warning, never fatal.
+  save. `load_floor` snapshots specs+entry+spawn+spawn_points+portals
+  before the override and restores them when validation refuses the
+  load,
+  so invalid layouts never poison the in-memory Floor. Corrupt/missing
+  layout = ignored with a warning, never fatal.
 - Floor management (create/delete): `FloorManager.create_floor(id,
   name, specs, auto_connect)` builds a Floor in memory, validates it,
   registers it, and persists the full definition to
@@ -375,8 +510,9 @@ bullets below.
   requests instead of mutating on clients (`_struct_manager`,
   `_struct_pending` HUD count, `_on_struct_result` refreshes panels;
   `payload.requester` distinguishes own ops from observers').
-  `--struct-op=create:rx,ry:ox,oy:w,h|delete:rx,ry|vis:rx,ry:a,b`
-  fires requests headless after sync. StructuralOpsSmokeTest covers
+  `--struct-op=create:rx,ry:ox,oy:w,h|delete:rx,ry|vis:rx,ry:a,b|
+  spawn:x,y:0|1` (x,y is a world CELL, 0 removes / 1 places) fires
+  requests headless after sync. StructuralOpsSmokeTest covers
   the C3 matrix.
 - Authoritative floor ops (Phase C4): floor create/delete are
   catalog-global (not floor-scoped), so they use their own RPC pair
@@ -532,7 +668,17 @@ bullets below.
   `_rpc_build_result(false, reason)`, applies once, then broadcasts
   `_rpc_build_result(true, payload)` to all clients — clients
   reproduce via `BuildOps.apply_*_any` with no re-request (a failed
-  local apply pushes a divergence warning). All build traffic is
+  local apply pushes a divergence warning AND still emits
+  build_result(true) — the server did accept; only the replica
+  drifted). Accepted results arriving while `world_synced` is false
+  or a floor transition is pending QUEUE in `_pending_build_ops`
+  (same pattern as `_pending_struct_ops`) and flush via
+  `_flush_pending_build_ops` on join/travel/rejected-transition/
+  aborted-snapshot — without this, destination-floor ops arriving
+  mid-transition were dropped by the floor filter and lost forever,
+  leaving the replica without supporting blocks (later stacked
+  placements then fail `can_place`). `_handle_build_result` is the
+  RPC-split testable entry point. All build traffic is
   floor-scoped: requests validate against the SENDER's floor world
   (`_world_for_peer`), results carry `floor_id`, and clients drop ops
   for floors they are not visiting (room ids collide across floors).

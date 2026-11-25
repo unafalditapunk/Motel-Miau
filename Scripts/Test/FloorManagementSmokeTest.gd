@@ -166,12 +166,13 @@ func _test_switch_and_independence() -> void:
 		"mgmt_b inherited mgmt_a content")
 	_expect(_player.grid_position == Vector2i(3, 3), "mgmt_b spawn %s != center (3,3)" % _player.grid_position)
 
-	# Back to mgmt_a: block and player position restored.
+	# Back to mgmt_a: block restored; the player re-spawns at the
+	# floor's spawn point — saved player_state no longer resumes.
 	_expect(_floor_manager.switch_floor(&"mgmt_a"), "switch mgmt_b->mgmt_a failed")
 	room_a = _room_world.get_room(Vector2i(0, 0))
 	_expect(room_a != null and room_a.block_layer != null and room_a.block_layer.blocks.size() == 1,
 		"mgmt_a block not restored")
-	_expect(_player.grid_position == Vector2i(5, 5), "mgmt_a player pos %s != (5,5)" % _player.grid_position)
+	_expect(_player.grid_position == Vector2i(4, 4), "mgmt_a respawn %s != spawn (4,4)" % _player.grid_position)
 
 func _test_delete_floors() -> void:
 	# mgmt_a is active; mgmt_b and mgmt_c are not.

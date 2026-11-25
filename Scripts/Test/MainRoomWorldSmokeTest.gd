@@ -224,7 +224,11 @@ func _test_room_saves() -> void:
 	RoomSaveSystem.save_dir = saved_dir
 	_expect(not state.is_empty(), "player state missing after save_all_rooms")
 	if not state.is_empty():
-		_expect(state["room_coordinates"] == room.room_coordinates, "player state room mismatch")
+		# The floor reload re-spawned the player at a spawn point, so
+		# compare against the player's CURRENT room, not the stale
+		# pre-reload reference.
+		var current_room: Room = _player.room
+		_expect(current_room != null and state["room_coordinates"] == current_room.room_coordinates, "player state room mismatch")
 		_expect(state["position"] == _player.grid_position, "player state position mismatch")
 
 func _test_camera_settled() -> void:

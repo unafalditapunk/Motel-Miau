@@ -179,6 +179,8 @@ static func layout_data(floor_def: Floor) -> Dictionary:
 		"floor_id": String(floor_def.floor_id),
 		"entry_room_id": [floor_def.entry_room_id.x, floor_def.entry_room_id.y],
 		"spawn_position": [floor_def.spawn_position.x, floor_def.spawn_position.y],
+		"spawn_points": _cell_array_to_arrays(floor_def.spawn_points),
+		"portals": portal_array_to_dicts(floor_def.portals),
 		"rooms": entries,
 	}
 
@@ -256,6 +258,8 @@ static func load_layout(floor_id: StringName) -> Dictionary:
 		"rooms": entries,
 		"entry_room_id": data.get("entry_room_id"),
 		"spawn_position": data.get("spawn_position"),
+		"spawn_points": data.get("spawn_points"),
+		"portals": data.get("portals"),
 	}
 
 # ------------------------------------------------------------------
@@ -394,6 +398,48 @@ static func connection_from_dict(data: Variant) -> RoomConnection:
 	if not texture_path.is_empty() and ResourceLoader.exists(texture_path):
 		connection.marker_texture = ResourceLoader.load(texture_path) as Texture2D
 	return connection
+
+# ------------------------------------------------------------------
+# Floor portals
+# ------------------------------------------------------------------
+##
+## Portals serialize inside layout_data (and therefore floor_def.json
+## and world snapshots) as {"id", "room_id", "cell", "dest"} entries —
+## one authoritative representation shared by disk and network, same
+## convention as spawn_points.
+
+static func portal_to_dict(portal: FloorPortal) -> Dictionary:
+	if portal == null:
+		return {}
+	return {
+		"id": String(portal.portal_id),
+		"room_id": [portal.room_id.x, portal.room_id.y],
+		"cell": [portal.world_cell.x, portal.world_cell.y],
+		"dest": String(portal.destination_floor_id),
+	}
+
+static func portal_array_to_dicts(portals: Array) -> Array:
+	var entries: Array = []
+	for portal in portals:
+		if portal != null:
+			entries.append(portal_to_dict(portal))
+	return entries
+
+## Rebuilds a FloorPortal from one serialized entry, or null when the
+## entry is unusable — malformed portal data is skipped by the caller,
+## never fatal to the floor.
+static func portal_from_dict(data: Variant) -> FloorPortal:
+	if not (data is Dictionary):
+		return null
+	var entry: Dictionary = data
+	var portal := FloorPortal.new()
+	portal.portal_id = StringName(str(entry.get("id", "")))
+	portal.room_id = _dict_vec2i(entry.get("room_id"))
+	portal.world_cell = _dict_vec2i(entry.get("cell"))
+	portal.destination_floor_id = StringName(str(entry.get("dest", "")))
+	if portal.portal_id == &"" or portal.destination_floor_id == &"":
+		return null
+	return portal
 
 static func _cell_array_to_arrays(cells: Array) -> Array:
 	var result: Array = []

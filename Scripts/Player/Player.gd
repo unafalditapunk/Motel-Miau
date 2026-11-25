@@ -46,6 +46,15 @@ var network_remote := false
 ## the authoritative world snapshot has been applied, so a client can
 ## never walk a world that does not match the server's.
 var local_input_locked := false
+## Floor portal trigger state: set when the player steps onto a portal
+## cell and the deferred floor switch is pending. Blocks retriggering
+## until the switch resolves (FloorManager.switch_floor is synchronous,
+## so the flag only guards the short animation delay).
+var _floor_portal_pending := false
+## Delay between stepping onto a portal cell and the floor switch, so
+## the step animation reads as walking through the doorway. Tests may
+## shrink it to 0.
+var floor_portal_delay := 0.18
 
 ## Emitted whenever the authoritative grid state (room/cell/elevation)
 ## settles after an accepted move. The dedicated server uses it to
@@ -361,7 +370,121 @@ func _start_move(direction: Vector2i) -> bool:
 			return true
 	var to_screen := _screen_position_for_cell(target, target_elevation)
 	authoritative_state_changed.emit()
-	return _play_move(from_screen, to_screen, from_elevation, target_elevation)
+	var played := _play_move(from_screen, to_screen, from_elevation, target_elevation)
+	# The step onto the cell is committed — now check for a floor
+	# portal. Interactive connections were already consulted above;
+	# placement rules keep the two from sharing a cell.
+	_trigger_floor_portal(target)
+	return played
+
+## Floor portal trigger: after a successful in-room step, asks the
+## FloorManager whether the stepped-on global cell hosts a portal on
+## the ACTIVE floor and, when it does, schedules the normal
+## FloorManager.switch_floor after a short delay so the step
+## animation plays first. Guards:
+##   - only the bound room_world (the active floor's world) is
+##     eligible — bodies on runtime/secondary worlds never trigger;
+##   - multiplayer CLIENTS route through
+##     MultiplayerManager.request_portal_transition instead of a
+##     local switch_floor — the server re-validates the portal
+##     against the peer's authoritative floor and body position;
+##   - dedicated-server bodies are authoritative proxies driven by
+##     client move RPCs — they never self-transition (their floor
+##     changes only inside _handle_floor_transition);
+##   - the destination must still be a registered floor, else the
+##     cell behaves like ordinary floor;
+##   - _floor_portal_pending prevents retriggering during the delay.
+func _trigger_floor_portal(local_cell: Vector2i) -> void:
+	if _floor_portal_pending or room == null:
+		return
+	var world := _room_world()
+	if world == null:
+		return
+	var floor_manager := _floor_manager()
+	if floor_manager == null or floor_manager.active_floor == null:
+		return
+	var mm := _multiplayer_manager()
+	if mm != null and mm.mode == MultiplayerManager.Mode.SERVER:
+		return
+	var mp_client := mm != null and mm.mode == MultiplayerManager.Mode.CLIENT
+	if not mp_client and floor_manager.structural_edits_readonly():
+		return
+	# Only the bound world hosts the active floor; runtime worlds
+	# (multiplayer secondary floors) are out of scope for P1.
+	if world != floor_manager.room_world:
+		return
+	var world_cell := room.world_cell_coordinates(local_cell)
+	var portal := floor_manager.portal_at(world_cell)
+	if portal == null:
+		return
+	var destination := portal.destination_floor_id
+	if floor_manager.get_floor(destination) == null:
+		# Stale portal (destination floor deleted outside the prune
+		# path): preserve normal movement rather than fail loudly on
+		# every step.
+		return
+	_floor_portal_pending = true
+	var stepped_room := room
+	get_tree().create_timer(maxf(floor_portal_delay, 0.0)).timeout.connect(
+		_on_floor_portal_delay_elapsed.bind(world_cell, stepped_room))
+
+## Deferred portal activation: fires after the step animation delay.
+## Cancels when the player no longer stands in the room instance the
+## portal was triggered from (a floor switch or room teardown already
+## moved them); otherwise re-resolves the portal (it may have been
+## deleted during the delay) and either performs the standard
+## single-player floor transition or asks the server to perform the
+## authoritative multiplayer one.
+func _on_floor_portal_delay_elapsed(world_cell: Vector2i, stepped_room: Room) -> void:
+	_floor_portal_pending = false
+	if not is_inside_tree() or not is_instance_valid(stepped_room) \
+			or room != stepped_room:
+		return
+	var floor_manager := _floor_manager()
+	if floor_manager == null:
+		return
+	var portal := floor_manager.portal_at(world_cell)
+	if portal == null:
+		return
+	var destination := portal.destination_floor_id
+	if floor_manager.get_floor(destination) == null:
+		return
+	var mm := _multiplayer_manager()
+	if mm != null and mm.mode == MultiplayerManager.Mode.CLIENT:
+		# Server-authoritative path: the server re-validates the
+		# portal against this peer's floor and body position and
+		# derives the destination itself. A refused request just
+		# leaves the player standing on the portal cell. The local
+		# TransitionOverlay picks up transition_requested /
+		# transition_result for the fade.
+		mm.request_portal_transition(world_cell)
+		return
+	# Single-player: run the switch under the transition slide when
+	# the overlay exists (it also locks input while it plays); fall
+	# back to a bare switch otherwise.
+	var overlay := _transition_overlay()
+	if overlay != null:
+		if not bool(overlay.play_transition(
+				func() -> bool: return floor_manager.switch_floor(destination))):
+			push_warning("Player: floor portal transition to '%s' failed; player stays put." % destination)
+		return
+	if not floor_manager.switch_floor(destination):
+		push_warning("Player: floor portal transition to '%s' failed; player stays put." % destination)
+
+func _multiplayer_manager() -> MultiplayerManager:
+	if not is_inside_tree():
+		return null
+	return get_tree().get_first_node_in_group(&"multiplayer_manager") as MultiplayerManager
+
+func _transition_overlay() -> TransitionOverlay:
+	if not is_inside_tree():
+		return null
+	return get_tree().get_first_node_in_group(&"transition_overlay") as TransitionOverlay
+
+func _floor_manager() -> FloorManager:
+	if not is_inside_tree():
+		return null
+	return get_tree().get_first_node_in_group(&"floor_managers") as FloorManager
 
 func _play_move(from_screen: Vector2, to_screen: Vector2, from_elevation: float, to_elevation: float) -> bool:
 	if move_duration <= 0.0 or grid == null:

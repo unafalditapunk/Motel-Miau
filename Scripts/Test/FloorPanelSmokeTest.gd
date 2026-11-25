@@ -8,6 +8,7 @@ extends SceneTree
 const SCRATCH_ROOT := "user://smoke_floor_panel_saves"
 
 var _frames := 0
+var _stage := 0
 var _failures: Array[String] = []
 var _world: WorldBootstrap
 var _panel: FloorPanel
@@ -23,12 +24,29 @@ func _initialize() -> void:
 func _process(_delta: float) -> bool:
 	_frames += 1
 	if _frames == 2:
+		# The P3 slide transition defers the floor switch until the
+		# slide-out finishes; zeroing the slide duration keeps
+		# switches synchronous for this frame-driven test.
+		_world.room_world.room_slide_duration = 0.0
 		_panel = _world.get_node_or_null("FloorPanel") as FloorPanel
 		_debug_hud = _world.get_node_or_null("DebugHud") as DebugHud
 		_controller = _world.get_node_or_null("BlockPlacementController") as BlockPlacementController
 	if _frames < 8:
 		return false
-	_run_checks()
+	if _stage == 0:
+		_run_checks()
+		_stage = 1
+		return false
+	# Stage 1: the last travel's transition fade must have released
+	# the input lock before world input is exercised again.
+	if TransitionOverlay.any_active(self):
+		return false
+	var pos_after := _world.player.grid_position
+	_world.player.request_move(Vector2i(1, 0))
+	_expect(_world.player.grid_position != pos_after, "player movement still blocked after panel closed")
+	_controller._unhandled_input(_key(KEY_E))
+	_expect(_controller.construction_mode, "E key did not toggle after panel closed")
+	_controller.construction_mode = false
 	_report()
 	quit()
 	return true
@@ -162,15 +180,9 @@ func _run_checks() -> void:
 	hud_text = _debug_hud._build_text()
 	_expect(hud_text.contains("Motel"), "debug HUD not updated back to motel")
 
-	# --- Panel closed by the successful travel: world input works ---
+	# --- Panel closed by the successful travel ---
 	_expect(not _panel.is_open(), "panel should be closed after successful travel")
 	_expect(not FloorPanel.any_open(self), "any_open still true after close")
-	var pos_after := player.grid_position
-	player.request_move(Vector2i(1, 0))
-	_expect(player.grid_position != pos_after, "player movement still blocked after panel closed")
-	_controller._unhandled_input(_key(KEY_E))
-	_expect(_controller.construction_mode, "E key did not toggle after panel closed")
-	_controller.construction_mode = false
 
 func _report() -> void:
 	if _failures.is_empty():

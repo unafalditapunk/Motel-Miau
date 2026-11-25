@@ -21,6 +21,10 @@ var _marker_nodes: Dictionary = {}
 ## mapped to their original modulate.a, plus their fade tweens.
 var _concealed_rooms: Dictionary = {}
 var _conceal_tweens: Dictionary = {}
+## Rooms slid out by slide_all_out (floor transitions), kept so
+## slide_all_home can restore exactly those on failure — rooms that
+## were already hidden by neighborhood rules are never tracked here.
+var _bulk_exit_rooms: Dictionary = {}
 
 func _init(room_world: RoomWorld) -> void:
 	_room_world = room_world
@@ -34,6 +38,7 @@ func set_room_home(room: Room, position: Vector2) -> void:
 func forget_room(room: Room) -> void:
 	_kill_room_slide(room)
 	_kill_conceal_tween(room)
+	_bulk_exit_rooms.erase(room)
 	_concealed_rooms.erase(room)
 	_room_materials.erase(room)
 	_room_home.erase(room)
@@ -204,6 +209,51 @@ func _on_room_slide_finished(room: Room) -> void:
 	room.position = _room_home.get(room, room.position)
 	if exiting:
 		room.visible = false
+
+# ------------------------------------------------------------------
+# Bulk floor-transition slides (TransitionOverlay, Phase P3)
+# ------------------------------------------------------------------
+
+## Slides every currently visible room down and off screen — the
+## "leave through the bottom" half of a floor transition. Returns the
+## number of rooms animated (0 means there was nothing to move).
+func slide_all_out() -> int:
+	_bulk_exit_rooms.clear()
+	var count := 0
+	for room in _room_world.registry.get_rooms():
+		if room == null or not room.visible:
+			continue
+		_bulk_exit_rooms[room] = true
+		_start_room_slide(room, true)
+		count += 1
+	return count
+
+## Slides every currently visible room in from above — the "arrive
+## from the top" half, played after the destination floor exists.
+## Hidden rooms stay hidden; they appear later via normal visibility.
+func slide_all_in() -> int:
+	_bulk_exit_rooms.clear()
+	var count := 0
+	for room in _room_world.registry.get_rooms():
+		if room == null or not room.visible:
+			continue
+		_start_room_slide(room, false)
+		count += 1
+	return count
+
+## Failure recovery: snaps every room that slide_all_out moved back
+## to its home position and visibility. Used when a transition is
+## rejected, times out, or the switch callable fails — the old floor
+## was never destroyed, so it simply reappears.
+func slide_all_home() -> void:
+	for room in _bulk_exit_rooms.keys():
+		if not is_instance_valid(room):
+			continue
+		_kill_room_slide(room)
+		room.position = _room_home.get(room, room.position)
+		room.is_sliding = false
+		room.visible = true
+	_bulk_exit_rooms.clear()
 
 # ------------------------------------------------------------------
 # Connection markers

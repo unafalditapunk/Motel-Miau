@@ -17,6 +17,20 @@ extends Resource
 @export var entry_room_id := Vector2i.ZERO
 ## Default spawn cell in local coordinates of the entry room.
 @export var spawn_position := Vector2i.ZERO
+## Global world cells marking the floor's spawn points — the natural
+## entries (future teleport targets). Every point must lie inside a
+## room's footprint; the FIRST point mirrors entry_room_id /
+## spawn_position so all existing spawn paths keep working. Floors
+## registered before this field existed derive a single point from
+## entry/spawn on load (FloorManager._normalize_spawn_points).
+@export var spawn_points: Array[Vector2i] = []
+## Hard limits enforced by FloorManager place/remove + validate_floor.
+const MIN_SPAWN_POINTS := 1
+const MAX_SPAWN_POINTS := 4
+## Floor portals: cells that transition the player to another Floor.
+## FloorPortal resources — independent from RoomConnection, which
+## stays intra-floor. Serialized with the layout like spawn_points.
+@export var portals: Array[FloorPortal] = []
 ## When true, materialization generates door connections between every
 ## pair of rooms sharing a world-cell edge (existing RoomWorld
 ## mechanism). Explicit connections in `connections` are added on top.

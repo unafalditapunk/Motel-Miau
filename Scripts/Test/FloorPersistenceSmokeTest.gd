@@ -215,13 +215,15 @@ func _test_content_and_player_persistence() -> void:
 	_expect(FileAccess.file_exists(FloorSaveSystem.floor_dir(&"pf_a").path_join("room_0_0_8x8.json")), "pf_a room save missing")
 	_expect(FileAccess.file_exists(FloorSaveSystem.floor_dir(&"pf_a").path_join("player_state.json")), "pf_a player save missing")
 
-	# Back to pf_a: contents, connection, and player position restored.
+	# Back to pf_a: contents and connection restored; the player
+	# re-spawns at the floor's spawn point — saved player_state no
+	# longer resumes a previous position.
 	_expect(_floor_manager.switch_floor(&"pf_a"), "switch pf_b->pf_a failed")
 	_expect(_active_room_count() == 2, "pf_a reload has %d rooms" % _active_room_count())
 	_expect(_room_world.connections.size() == 1, "pf_a connection not restored")
 	room_a = _room_world.get_room(Vector2i(0, 0))
 	_expect(room_a != null and room_a.block_layer != null and room_a.block_layer.blocks.size() == 1, "pf_a block not restored (blocks=%d)" % (room_a.block_layer.blocks.size() if room_a != null and room_a.block_layer != null else -1))
-	_expect(_player_room_id() == Vector2i(0, 0) and _player.grid_position == Vector2i(5, 5), "pf_a player pos not restored: %s @ %s" % [_player_room_id(), _player.grid_position])
+	_expect(_player_room_id() == Vector2i(0, 0) and _player.grid_position == Vector2i(2, 2), "pf_a spawn not applied: %s @ %s" % [_player_room_id(), _player.grid_position])
 
 func _test_corrupt_manifest() -> void:
 	# pf_a is active with unsaved state? No — it was just loaded. Move the
@@ -235,11 +237,12 @@ func _test_corrupt_manifest() -> void:
 	_expect(not _floor_manager.has_floor_save(&"pf_b"), "corrupt manifest reported as valid save")
 
 	var before_rooms := _active_room_count()
-	var before_pos := _player.grid_position
 	_expect(not _floor_manager.switch_floor(&"pf_b"), "switch to corrupt-save floor succeeded")
 	_expect(_floor_manager.active_floor != null and _floor_manager.active_floor.floor_id == &"pf_a", "active floor changed despite failed switch")
 	_expect(_active_room_count() == before_rooms, "world torn down by failed switch")
-	_expect(_player.grid_position == before_pos, "player moved by failed switch")
+	# Rollback reloads pf_a like any floor entry: the player lands on
+	# the floor's spawn point, not the pre-switch position.
+	_expect(_player.grid_position == Vector2i(2, 2), "failed-switch rollback did not respawn at (2,2): %s" % _player.grid_position)
 
 	# Repair the manifest; the floor now loads fresh (manifest ok, no rooms).
 	var floor_b := _floor_manager.get_floor(&"pf_b")
