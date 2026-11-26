@@ -207,7 +207,7 @@ func _test_isometric_placement() -> void:
 			_expect(tile_layer._tiles.size() == 64, "room C has %d floor sprites, expected 64" % tile_layer._tiles.size())
 			var sprite := tile_layer._tiles.get(Vector2i.ZERO) as Sprite2D
 			if sprite != null:
-				var expected := _grid.grid_to_screen(Vector2i(48, 4))
+				var expected := _grid.grid_to_screen(Vector2i(48, 4)) + _tile_sprite_offset(room_c, Vector2i.ZERO)
 				_expect(sprite.global_position.distance_to(expected) < 0.01, "room C floor sprite at %s != world cell (48,4) screen %s" % [sprite.global_position, expected])
 	# Shared edges must be exactly one isometric step apart.
 	var expected_step := _grid.grid_to_screen(Vector2i(1, 0)) - _grid.grid_to_screen(Vector2i.ZERO)
@@ -307,6 +307,17 @@ func _test_save_load() -> void:
 	# Clean up so repeated runs start from a clean save.
 	room_d.block_layer.clear_blocks()
 	_room_world.save_room_state(room_d)
+
+## Screen-space offset TileLayer applies to tall tile sprites
+## (texture taller than tile_height, bottom-center anchor).
+func _tile_sprite_offset(room: Room, local: Vector2i) -> Vector2:
+	var tile := room.get_cell_tile(local) as TileDefinition
+	if tile == null or tile.sprite_texture == null or tile.sprite_anchor != 0:
+		return Vector2.ZERO
+	var size := tile.sprite_texture.get_size()
+	if size.y <= _grid.tile_height + 0.001:
+		return Vector2.ZERO
+	return Vector2(0.0, _grid.tile_height * 0.5 - size.y * 0.5)
 
 func _report() -> void:
 	if _failures.is_empty():

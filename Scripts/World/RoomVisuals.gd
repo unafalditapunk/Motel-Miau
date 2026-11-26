@@ -312,7 +312,7 @@ func _rebuild_room_markers(room: Room) -> void:
 		sprite.name = "Marker_%s" % str(connection.connection_id)
 		sprite.texture = texture
 		sprite.centered = true
-		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_PARENT_NODE
 		sprite.position = room.grid.grid_to_screen_position(center, 0.0)
 		# Ground decal: above floor tiles, below blocks standing on the cell.
 		sprite.z_index = int(best_depth) - 1

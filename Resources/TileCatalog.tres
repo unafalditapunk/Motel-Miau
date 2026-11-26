@@ -1,8 +1,16 @@
-[gd_resource type="Resource" script_class="TileCatalog" load_steps=3 format=3]
+[gd_resource type="Resource" script_class="TileCatalog" load_steps=11 format=3]
 
 [ext_resource type="Script" path="res://Scripts/Objects/TileCatalog.gd" id="1"]
 [ext_resource type="Resource" path="res://Resources/Tiles/FloorIso.tres" id="2"]
+[ext_resource type="Resource" path="res://Resources/Tiles/GrassIso.tres" id="3"]
+[ext_resource type="Resource" path="res://Resources/Tiles/BushyGrass.tres" id="4"]
+[ext_resource type="Resource" path="res://Resources/Tiles/DirtGrassTile.tres" id="5"]
+[ext_resource type="Resource" path="res://Resources/Tiles/MushroomMud.tres" id="6"]
+[ext_resource type="Resource" path="res://Resources/Tiles/RockyTerrain.tres" id="7"]
+[ext_resource type="Resource" path="res://Resources/Tiles/SandIso.tres" id="8"]
+[ext_resource type="Resource" path="res://Resources/Tiles/SimpleGrassIso.tres" id="9"]
+[ext_resource type="Resource" path="res://Resources/Tiles/SticksMud.tres" id="10"]
 
 [resource]
 script = ExtResource("1")
-definitions = Array[Resource]([ExtResource("2")])
+definitions = Array[Resource]([ExtResource("2"), ExtResource("3"), ExtResource("4"), ExtResource("5"), ExtResource("6"), ExtResource("7"), ExtResource("8"), ExtResource("9"), ExtResource("10")])

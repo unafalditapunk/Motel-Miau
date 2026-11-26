@@ -33,6 +33,6 @@ display_name = "Motel Center"
 grid = ExtResource("4")
 size = Vector2i(12, 12)
 floor_texture = ExtResource("2")
-default_tile_id = &"floor_iso"
+default_tile_id = &"grass_iso"
 spawn_position = Vector2i(6, 6)
 furniture_placements = Array[Resource]([SubResource("Resource_chair_a"), SubResource("Resource_chair_b"), SubResource("Resource_chair_c")])

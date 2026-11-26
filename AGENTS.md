@@ -131,6 +131,23 @@ bullets below.
   transition. The landing cell is the one actually stepped into when it
   is a declared entry (concave corners can border several cells of the
   same room).
+- Tile sprites (`TileLayer`): textures ≤ `grid.tile_height` px tall are
+  stretched into the 64×32 diamond as before. Taller textures render at
+  native scale, anchored by `TileDefinition.sprite_anchor`: 0 (default)
+  = Bottom Center, the texture's bottom `tile_height` px form the cell
+  diamond and decoration grows upward (grass etc.); 1 = Center. Tall
+  tiles sort at surface depth (no -54/-145 offset) so upward art stays
+  in front of cells behind them; they still lose to the player (+1)
+  and to blocks on the same cell (tree order). Carpets also sort at
+  surface depth so they always render above every tile; blocks still
+  win over carpets via child order (BlockLayer is added last).
+- Texture filtering: all sprite `.import` files generate mipmaps.
+  World-space sprites (tiles, carpets, markers, player, blocks,
+  furniture, ghost) use `TEXTURE_FILTER_PARENT_NODE` and inherit the
+  viewport default, which `WorldCamera._apply_zoom_level` switches per
+  zoom: NEAREST at ≥1×, LINEAR_WITH_MIPMAPS below 1× (the 0.5 overview)
+  so minified sprites sample averaged mips instead of aliasing.
+  PixelUi controls keep hard NEAREST (screen-space UI is not zoomed).
 - Connection markers: optional ground sprites at connection cells, drawn
   by `RoomVisuals` under each room's `ConnectionMarkers` node. Per
   connection `marker_texture` overrides the RoomWorld per-type exports

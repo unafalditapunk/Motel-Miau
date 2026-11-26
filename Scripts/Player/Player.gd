@@ -605,7 +605,7 @@ func _ensure_sprite_frames() -> void:
 			visual.sprite_frames.add_animation(&"idle")
 		visual.sprite_frames.add_frame(&"idle", sprite_texture)
 	_update_facing_animation()
-	visual.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	visual.texture_filter = CanvasItem.TEXTURE_FILTER_PARENT_NODE
 
 func _has_directional_textures() -> bool:
 	return sprite_down_right != null and sprite_up_left != null and sprite_down_left != null and sprite_up_right != null

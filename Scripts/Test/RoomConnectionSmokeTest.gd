@@ -307,7 +307,7 @@ func _test_connection_markers() -> void:
 		if sprites.size() == 1:
 			var sprite := sprites[0] as Sprite2D
 			_expect(sprite.texture == tex, "marker sprite texture mismatch")
-			_expect(sprite.texture_filter == CanvasItem.TEXTURE_FILTER_NEAREST, "marker not nearest-filtered")
+			_expect(sprite.texture_filter == CanvasItem.TEXTURE_FILTER_PARENT_NODE, "marker not inheriting viewport filter")
 	# Unmarked door connections must not produce sprites.
 	var room_b := _room_world.get_room(Vector2i(1, 0))
 	var holder_b := room_b.get_node_or_null(^"ConnectionMarkers") as Node2D

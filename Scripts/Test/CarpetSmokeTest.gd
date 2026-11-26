@@ -66,8 +66,6 @@ func _check_carpet_surface(cell: Vector2i, surface: float, elevated: bool, label
 		"%s: carpet sprite not positioned at surface height" % label)
 	var front_cell := cell + footprint - Vector2i.ONE
 	var expected_z := _world.carpet_layer._depth_for_cell(front_cell, surface)
-	if not elevated:
-		expected_z += -54 if _world.carpet_layer.compact_depth else CarpetLayer.DEPTH_OFFSET
 	_expect(sprite.z_index == expected_z,
 		"%s: carpet z_index %d != expected %d" % [label, sprite.z_index, expected_z])
 
@@ -88,7 +86,8 @@ func _run_checks() -> void:
 	if block_definition == null:
 		return
 
-	# Floor carpet: no supporting blocks, keeps the below-blocks depth offset.
+	# Floor carpet: no supporting blocks, sorts at surface depth so it
+	# stays above every tile (including tall tiles).
 	var floor_cell := _find_cell()
 	_expect(floor_cell != Vector2i(-1, -1), "no free cell available for floor carpet")
 	if floor_cell != Vector2i(-1, -1):

@@ -106,6 +106,17 @@ func _apply_zoom_level() -> void:
 		return
 	var level := zoom_levels[current_zoom_index]
 	zoom = Vector2(level, level)
+	# Minified rendering (zoom < 1, e.g. the 0.5 overview) aliases
+	# badly under NEAREST — two texels share one screen pixel and
+	# edges crawl. Switch the viewport default to trilinear mipmaps
+	# only while zoomed out; sprites that set their own filter are
+	# unaffected, inheriting sprites get smooth minification.
+	var viewport := get_viewport()
+	if viewport != null:
+		viewport.canvas_item_default_texture_filter = \
+			Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS \
+			if level < 1.0 \
+			else Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST
 
 func _unhandled_input(event: InputEvent) -> void:
 	if _editor_active and event is InputEventMouseButton:

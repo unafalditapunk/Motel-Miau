@@ -1,9 +1,6 @@
 class_name CarpetLayer
 extends Node2D
 
-const DEPTH_OFFSET := -144
-const EPSILON := 0.001
-
 var grid: IsometricGrid
 var room: Room
 var cell_origin := Vector2i.ZERO
@@ -48,7 +45,7 @@ func _update_carpet_sprite(coordinates: Vector2i, cell: RoomCell) -> void:
 	if sprite == null or not is_instance_valid(sprite):
 		sprite = Sprite2D.new()
 		sprite.centered = true
-		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_PARENT_NODE
 		add_child(sprite)
 		_carpets[coordinates] = sprite
 	var texture := carpet.sprite_texture
@@ -70,10 +67,14 @@ func _update_carpet_sprite(coordinates: Vector2i, cell: RoomCell) -> void:
 	sprite.position = grid.grid_to_screen_position(_carpet_center(coordinates, footprint), cell.carpet_elevation)
 	if room != null:
 		room.apply_deemphasis_to(sprite)
+	# Carpets sort at surface depth (no offset): they must stay visually
+	# above every tile — including tall tiles, which also use surface
+	# depth — while still losing to blocks on the same cell via child
+	# order (BlockLayer is added after CarpetLayer) and to the player
+	# (+1 depth).
 	var front_cell := coordinates + footprint - Vector2i.ONE
 	var depth := _depth_for_cell(front_cell, cell.carpet_elevation)
-	var depth_offset := -54 if compact_depth else DEPTH_OFFSET
-	sprite.z_index = depth + depth_offset if cell.carpet_elevation <= EPSILON else depth
+	sprite.z_index = depth
 
 func _carpet_center(anchor: Vector2i, footprint: Vector2i) -> Vector2:
 	return Vector2(anchor) + Vector2(footprint - Vector2i.ONE) * 0.5

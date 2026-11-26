@@ -119,13 +119,16 @@ func _show_tile(definition: TileDefinition, cell: Vector2i, room: Room, layer: B
 	_sprite.rotation_degrees = 0.0
 	_sprite.flip_h = false
 	var texture := _sprite.texture
+	_sprite.scale = Vector2.ONE
 	if texture != null:
 		var texture_size := texture.get_size()
 		if texture_size.x > 0.0 and texture_size.y > 0.0:
-			_sprite.scale = Vector2(room.grid.tile_width / texture_size.x, room.grid.tile_height / texture_size.y)
-		else:
-			_sprite.scale = Vector2.ONE
-	else:
-		_sprite.scale = Vector2.ONE
+			if texture_size.y > room.grid.tile_height + 0.001:
+				# Tall tile: same convention as TileLayer — native scale,
+				# bottom tile_height px form the cell diamond.
+				if definition.sprite_anchor == 0:
+					_sprite.position.y = room.grid.tile_height * 0.5 - texture_size.y * 0.5
+			else:
+				_sprite.scale = Vector2(room.grid.tile_width / texture_size.x, room.grid.tile_height / texture_size.y)
 	_sprite.modulate = VALID_COLOR
 	position = room.grid.grid_to_screen_position(Vector2(cell + room.cell_origin), layer.get_top_z_at(cell))

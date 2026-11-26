@@ -18,6 +18,10 @@ func _process(_delta: float) -> bool:
 		_controller = _world.get_node_or_null("BlockPlacementController") as BlockPlacementController
 		if _world.tile_catalog != null:
 			_tile_def = _world.tile_catalog.get_definition(&"floor_iso")
+		# The room's default tile is whatever the world config says
+		# (currently grass_iso); prefer it over the catalog lookup.
+		if _room != null and _room.default_tile != null:
+			_tile_def = _room.default_tile
 	if _frames < 5:
 		return false
 	_reset_tiles()
@@ -116,7 +120,8 @@ func _run_checks() -> void:
 		_expect(_world.tile_layer != null and _world.tile_layer._tiles.has(blocked),
 			"TileLayer missing sprite for elevated tile")
 		var sprite: Sprite2D = _world.tile_layer._tiles[blocked]
-		_expect(is_equal_approx(sprite.position.y, _world.room.grid.grid_to_screen_position(Vector2(blocked), surface).y),
+		var expected_sprite_y := _world.room.grid.grid_to_screen_position(Vector2(blocked), surface).y + _tile_anchor_y(blocked_cell.tile)
+		_expect(is_equal_approx(sprite.position.y, expected_sprite_y),
 			"elevated tile sprite not positioned at surface height")
 		var surface_depth := _world.tile_layer._depth_for_cell(blocked, surface)
 		var expected_z := surface_depth if surface > 0.001 else surface_depth + (-54 if _world.tile_layer.compact_depth else -145)
@@ -145,6 +150,50 @@ func _run_checks() -> void:
 		RoomSaveSystem.apply_room_state(_world.room_world, _room, elevated_data, _world.player)
 		_expect(is_equal_approx(_room.get_cell(blocked).tile_elevation, surface),
 			"apply_data did not restore elevated tile (got %.2f)" % _room.get_cell(blocked).tile_elevation)
+
+	# Tall tile: a texture taller than tile_height renders at native
+	# scale, bottom-anchored (bottom tile_height px = the cell diamond),
+	# and sorts at surface depth so upward decoration stays in front of
+	# what is behind it.
+	var tall_cell := _free_cell()
+	if tall_cell != Vector2i(-1, -1):
+		var image := Image.create(64, 64, false, Image.FORMAT_RGBA8)
+		image.fill(Color(0.2, 0.6, 0.3, 1.0))
+		var tall_def := TileDefinition.new()
+		tall_def.object_id = &"tall_test"
+		tall_def.display_name = "Tall Test"
+		tall_def.sprite_texture = ImageTexture.create_from_image(image)
+		_room.set_cell_tile(tall_cell, tall_def)
+		_world.tile_layer._resync_tiles()
+		var tall_sprite: Sprite2D = _world.tile_layer._tiles.get(tall_cell)
+		_expect(tall_sprite != null, "TileLayer missing sprite for tall tile")
+		var cell_center := _room.grid.grid_to_screen_position(Vector2(tall_cell), 0.0)
+		if tall_sprite != null:
+			_expect(tall_sprite.scale == Vector2.ONE, "tall tile was rescaled: %s" % str(tall_sprite.scale))
+			var expected_y: float = cell_center.y + float(_room.grid.tile_height) * 0.5 - 64.0 * 0.5
+			_expect(is_equal_approx(tall_sprite.position.y, expected_y),
+				"tall tile bottom-anchor off: got %.2f want %.2f" % [tall_sprite.position.y, expected_y])
+			var tall_depth := _world.tile_layer._depth_for_cell(tall_cell, 0.0)
+			_expect(tall_sprite.z_index == tall_depth,
+				"tall tile z_index %d != surface depth %d" % [tall_sprite.z_index, tall_depth])
+			# Center anchor variant: texture center sits on the cell center.
+			tall_def.sprite_anchor = 1
+			_world.tile_layer._resync_tiles()
+			_expect(is_equal_approx(tall_sprite.position.y, cell_center.y),
+				"center-anchored tall tile off: got %.2f want %.2f" % [tall_sprite.position.y, cell_center.y])
+			tall_def.sprite_anchor = 0
+		_room.set_cell_tile(tall_cell, _tile_def)
+		_world.tile_layer._resync_tiles()
+
+## Vertical anchor offset TileLayer applies to tall tile sprites
+## (texture taller than tile_height, bottom-center anchor).
+func _tile_anchor_y(tile: TileDefinition) -> float:
+	if tile == null or tile.sprite_texture == null or tile.sprite_anchor != 0:
+		return 0.0
+	var height := tile.sprite_texture.get_size().y
+	if height <= _room.grid.tile_height + 0.001:
+		return 0.0
+	return _room.grid.tile_height * 0.5 - height * 0.5
 
 func _reset_tiles() -> void:
 	if _room == null:

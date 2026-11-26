@@ -168,15 +168,26 @@ func _test_floors() -> void:
 	if corner_room != null and corner_tiles != null:
 		var sprite := corner_tiles._tiles.get(Vector2i.ZERO) as Sprite2D
 		if sprite != null:
-			var expected := _grid.grid_to_screen(corner_room.world_cell_coordinates(Vector2i.ZERO))
+			var expected := _grid.grid_to_screen(corner_room.world_cell_coordinates(Vector2i.ZERO)) + _tile_sprite_offset(corner_room, Vector2i.ZERO)
 			_expect(sprite.global_position.distance_to(expected) < 0.01, "corner floor sprite at %s != world cell %s" % [sprite.global_position, expected])
 	var far_room := _room_world.get_room(Vector2i(1, 1))
 	var far_tiles := _room_world.get_tile_layer(Vector2i(1, 1))
 	if far_room != null and far_tiles != null:
 		var sprite := far_tiles._tiles.get(Vector2i(15, 15)) as Sprite2D
 		if sprite != null:
-			var expected := _grid.grid_to_screen(far_room.world_cell_coordinates(Vector2i(15, 15)))
+			var expected := _grid.grid_to_screen(far_room.world_cell_coordinates(Vector2i(15, 15))) + _tile_sprite_offset(far_room, Vector2i(15, 15))
 			_expect(sprite.global_position.distance_to(expected) < 0.01, "far floor sprite at %s != world cell %s" % [sprite.global_position, expected])
+
+## Screen-space offset TileLayer applies to tall tile sprites
+## (texture taller than tile_height, bottom-center anchor).
+func _tile_sprite_offset(room: Room, local: Vector2i) -> Vector2:
+	var tile := room.get_cell_tile(local) as TileDefinition
+	if tile == null or tile.sprite_texture == null or tile.sprite_anchor != 0:
+		return Vector2.ZERO
+	var size := tile.sprite_texture.get_size()
+	if size.y <= _grid.tile_height + 0.001:
+		return Vector2.ZERO
+	return Vector2(0.0, _grid.tile_height * 0.5 - size.y * 0.5)
 
 func _test_camera() -> void:
 	if _camera == null or _player == null:
