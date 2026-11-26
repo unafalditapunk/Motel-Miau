@@ -23,6 +23,8 @@ const LAYOUT := {
 
 var _room_world: RoomWorld
 var _frames := 0
+var _stage := 0
+var _slide_wait := 0
 var _failures: Array[String] = []
 
 func _initialize() -> void:
@@ -90,10 +92,22 @@ func _process(_delta: float) -> bool:
 	_frames += 1
 	if _frames < 6:
 		return false
-	_run_checks()
-	_report()
-	quit()
-	return true
+	match _stage:
+		0:
+			_run_checks()
+			_slide_regression_setup()
+			_stage = 1
+			_slide_wait = 0
+		1:
+			# Let the 0.05s slide tweens finish, then verify.
+			_slide_wait += 1
+			if _slide_wait < 12:
+				return false
+			_slide_regression_check()
+			_report()
+			quit()
+			return true
+	return false
 
 func _room_visible(room_id: Vector2i) -> bool:
 	var room := _room_world.get_room(room_id)
@@ -186,6 +200,27 @@ func _run_checks() -> void:
 		registered[room.room_coordinates] = true
 	for id in _room_world.get_visible_room_coordinates():
 		_expect(registered.has(id), "visible set contains unregistered room id %s" % id)
+
+## Regression: rooms being hidden by a neighborhood change are mid
+## EXIT slide (room.visible stays true until the tween ends).
+## slide_all_in — the floor-transition "arrive from top" half — must
+## not resurrect them into a slide-in, or they stay visible forever
+## because nothing re-evaluates visibility after the transition.
+func _slide_regression_setup() -> void:
+	_room_world.room_slide_duration = 0.05
+	# Primary A: visible = A/B/C; F and D should hide -> exit slides.
+	_room_world.set_primary_room(Vector2i(0, 0))
+	_room_world.visuals.slide_all_in()
+
+func _slide_regression_check() -> void:
+	_room_world.room_slide_duration = 0.0
+	_expect(not _room_visible(Vector2i(6, 5)),
+		"slide_all_in resurrected exit-sliding room F")
+	_expect(not _room_visible(Vector2i(9, 9)),
+		"slide_all_in resurrected exit-sliding room D")
+	_expect(_room_visible(Vector2i(0, 0)), "slide_all_in hid primary room A")
+	_expect(_room_visible(Vector2i(1, 0)), "slide_all_in hid neighbor room B")
+	_expect(_room_visible(Vector2i(5, 5)), "slide_all_in hid connected room C")
 
 func _report() -> void:
 	if _failures.is_empty():

@@ -31,7 +31,7 @@ WorldSnapshotSmokeTest, BuildOpsSmokeTest,
 StructuralGuardSmokeTest, FloorTransitionSmokeTest,
 StructuralOpsSmokeTest, FloorOpsSmokeTest, ServerPersistenceSmokeTest,
 SpawnPointSmokeTest, PortalSmokeTest, PortalTransitionSmokeTest,
-TransitionOverlaySmokeTest.
+PortalLifecycleSmokeTest, TransitionOverlaySmokeTest.
 Each prints `<NAME>_SMOKE: OK`. Tests that touch the filesystem redirect
 `RoomSaveSystem.save_dir`/`FloorSaveSystem.save_root` to a
 `user://smoke_*` scratch dir so they never write to the real saves.
@@ -303,8 +303,20 @@ bullets below.
   `Floor.portals` link one GLOBAL world cell to another floor —
   independent from `RoomConnection` (which stays intra-floor).
   Fields: `portal_id` (deterministic `portal_x_y` from the cell),
-  `room_id`, `world_cell`, `destination_floor_id` (no spawn selection
-  yet — arrivals use the normal random spawn). Managed by
+  `room_id`, `world_cell`, `destination_floor_id`, and optional
+  `destination_world_cell` (arrival override — `NO_DESTINATION_CELL`
+  sentinel = normal random spawn). The arrival cell must sit inside
+  a room footprint of the DESTINATION floor (`_can_place_portal`
+  refuses bad cells at authoring time); pointing it at another
+  portal's cell creates portal-to-portal chains. A stale arrival
+  (e.g. its room was later deleted) only warns in `validate_floor`
+  and falls back to spawn placement at travel time via
+  `arrival_placement_for_cell` — it never blocks floor loading.
+  `FloorManager.switch_floor_at(id, cell)` / `_arrival_override_cell`
+  carry the override through single-player switches (consumed by
+  `_ensure_player_placement` even with no player bound); multiplayer
+  resolves it server-side in `_handle_floor_transition` — the client
+  never sends it. Managed by
   `FloorManager.place_portal`/`remove_portal`/
   `update_portal_destination` (active floor) and the `*_on_floor`
   variants (runtime worlds): cell must be inside a room footprint,
@@ -322,16 +334,21 @@ bullets below.
   `Player._trigger_floor_portal` looks up `portal_at(world_cell)` on
   the bound world only (skips readonly/MP-replica worlds and stale
   destinations), arms `_floor_portal_pending`, and
-  `floor_portal_delay` (0.18s) later calls the normal
-  `switch_floor(destination)` — save outgoing, materialize, random
-  spawn, rollback on failure. Portal cells and interactive
+  `floor_portal_delay` (0.18s, effectively max(delay, move_duration)
+  so the step tween always finishes first — otherwise place_at cuts
+  it short and the sprite snaps) later calls `switch_floor(destination)`
+  or `switch_floor_at` when the portal has an arrival cell — save
+  outgoing, materialize, spawn/arrival placement, rollback on failure.
+  Portal cells and interactive
   connection cells are mutually exclusive by placement rule, so the
   two trigger paths never compete. Creation Mode H tool (GRID view):
   LMB opens a panel — place mode on free cells (destination picker
   lists floors by name, current floor excluded, Place disabled with
   reason on invalid cells), edit mode on existing portals (retarget
   or Delete); purple diamond markers + destination labels draw in
-  GRID view. Multiplayer (Phase P2): portal DEFINITIONS reach clients
+  GRID view. The portal panel's "Arrive at" picker offers Random
+  spawn or any portal on the destination floor (portal chains).
+  Multiplayer (Phase P2): portal DEFINITIONS reach clients
   free via WorldSnapshot (`layout_data` -> `apply_layout_data`), but
   ACTIVATION is server-authoritative — a client steps on a portal
   cell, `Player._on_floor_portal_delay_elapsed` calls
@@ -340,8 +357,11 @@ bullets below.
   `_peer_floor` + `portal_at_on_floor` + the body's authoritative
   `room.world_cell_coordinates(grid_position)` (movement is
   server-validated via `_rpc_move_request` -> `body.request_move`),
-  derives the destination from the portal itself, then delegates to
-  the shared `_handle_floor_transition` C2 pipeline. Dedicated-server
+  derives the destination AND the optional arrival cell from the
+  portal itself (server data — clients cannot pick a landing cell),
+  then delegates to the shared `_handle_floor_transition` C2
+  pipeline, which resolves `arrival_placement_for_cell` before
+  falling back to `spawn_placement_for`. Dedicated-server
   bodies never self-trigger. Server in-flight guard (P2.1):
   `_transition_inflight[peer_id] = {id, msec}` is acquired at the
   commit point and held until the client acks the travel snapshot via
@@ -364,9 +384,14 @@ bullets below.
   room slide animation: `RoomVisuals.slide_all_out()` slides every
   visible room down/off, `slide_all_in()` slides the destination
   floor's rooms in from above, `slide_all_home()` snaps bulk-exited
-  rooms back on failure (tracked in `_bulk_exit_rooms`). The entity
-  layer is hidden for the duration so the player/avatars don't float
-  on the vacated floor. Single-player `play_transition(callable)` is
+  rooms back on failure (tracked in `_bulk_exit_rooms`). Rooms mid
+  EXIT slide at slide_all_in time are the should-be-hidden set —
+  slide_all_in snaps them hidden instead of sliding them in, or they
+  would stay visible forever (exit slides keep room.visible true and
+  nothing re-evaluates visibility after the transition). Entities are
+  NEVER hidden — the player stays visible through the whole
+  transition (input unlocks the instant the destination world is
+  ready; they can walk during slide-in). Single-player `play_transition(callable)` is
   DEFERRED: slide-out plays, then the callable runs once the screen
   has cleared, then slide-in — the result arrives via the
   `transition_completed(success)` signal (play_transition returns
@@ -382,6 +407,20 @@ bullets below.
   state is captured once so re-entry can't wedge the lock. Per-player
   isolation is structural — each client owns one overlay fed only by
   its local lifecycle signals; nothing is broadcast.
+  Portal lifecycle hardening (Phase P4): client `_pending_avatar_spawns`
+  queues the latest spawn/state per peer when the floor matches but the
+  room is not materialized yet — retried per frame, deduplicated,
+  cleared on despawn/floor-change/disconnect; wrong-floor states are
+  discarded. `_rpc_floor_transition_rejected` echoes the request
+  `transition_id` and the client honors only a match to its live
+  pending serial (`_handle_transition_rejected`; id 0 = unversioned
+  legacy). `_rpc_move_request` drops requests while the sender's
+  transition is unresolved. Occupied-floor delete is intentionally
+  rejected `occupied` BEFORE any mutation (no evacuation); a pending
+  join snapshot (`_pending_peers`) also blocks primary-floor delete
+  (`busy`). Floor-op rejection reasons map to friendly FloorPanel
+  text. Listen-server host travel is deferred — no host-player mode
+  exists (see MULTIPLAYER_STATUS.md).
   `TransitionOverlay.any_active(tree)` lets building UI
   (BlockPlacementController) refuse input mid-transition;
   `find_overlay` locates it. `WorldBootstrap.switch_floor`,

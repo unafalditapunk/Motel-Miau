@@ -46,6 +46,7 @@ TESTS=(
     SpawnPointSmokeTest
     PortalSmokeTest
     PortalTransitionSmokeTest
+    PortalLifecycleSmokeTest
     TransitionOverlaySmokeTest
 )
 

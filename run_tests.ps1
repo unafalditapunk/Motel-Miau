@@ -48,6 +48,7 @@ $Tests = @(
     "SpawnPointSmokeTest",
     "PortalSmokeTest",
     "PortalTransitionSmokeTest",
+    "PortalLifecycleSmokeTest",
     "TransitionOverlaySmokeTest"
 )
 

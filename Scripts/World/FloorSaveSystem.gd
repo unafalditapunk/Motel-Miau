@@ -411,12 +411,16 @@ static func connection_from_dict(data: Variant) -> RoomConnection:
 static func portal_to_dict(portal: FloorPortal) -> Dictionary:
 	if portal == null:
 		return {}
-	return {
+	var dict := {
 		"id": String(portal.portal_id),
 		"room_id": [portal.room_id.x, portal.room_id.y],
 		"cell": [portal.world_cell.x, portal.world_cell.y],
 		"dest": String(portal.destination_floor_id),
 	}
+	if portal.has_destination_cell():
+		dict["dest_cell"] = [portal.destination_world_cell.x,
+			portal.destination_world_cell.y]
+	return dict
 
 static func portal_array_to_dicts(portals: Array) -> Array:
 	var entries: Array = []
@@ -437,6 +441,8 @@ static func portal_from_dict(data: Variant) -> FloorPortal:
 	portal.room_id = _dict_vec2i(entry.get("room_id"))
 	portal.world_cell = _dict_vec2i(entry.get("cell"))
 	portal.destination_floor_id = StringName(str(entry.get("dest", "")))
+	if entry.has("dest_cell"):
+		portal.destination_world_cell = _dict_vec2i(entry.get("dest_cell"))
 	if portal.portal_id == &"" or portal.destination_floor_id == &"":
 		return null
 	return portal

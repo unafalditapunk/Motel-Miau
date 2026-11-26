@@ -68,7 +68,35 @@ func _process(_delta: float) -> bool:
 			_test_trigger_result()
 			_test_stale_portal()
 			_stage = 3
+			_wait = 0
 		3:
+			# Portal chain leg 1: pt_b is active and the player stands
+			# on portal B's cell (5,5) — the arrival cell portal A
+			# targeted. Plant portal B there -> pt_a arriving on
+			# portal A's cell (4,4), then step off and back on.
+			_test_chain_leg1()
+			_stage = 4
+		4:
+			# Same deferred-switch wait as stage 2.
+			_wait += 1
+			if _player._floor_portal_pending or _wait < 4:
+				return false
+			if TransitionOverlay.any_active(self) and _wait < 240:
+				return false
+			_test_chain_leg1_result()
+			_test_chain_leg2()
+			_stage = 5
+			_wait = 0
+		5:
+			# Same deferred-switch wait as stage 2.
+			_wait += 1
+			if _player._floor_portal_pending or _wait < 4:
+				return false
+			if TransitionOverlay.any_active(self) and _wait < 240:
+				return false
+			_test_chain_leg2_result()
+			_stage = 6
+		6:
 			_test_connection_unchanged()
 			_test_editor()
 			_report()
@@ -221,6 +249,45 @@ func _test_validation_and_lookup() -> void:
 		"portal missing on pt_b")
 	var pt_b := _fm.get_floor(&"pt_b")
 	_expect(pt_b != null and pt_b.portals.size() == 1, "pt_b portal count wrong")
+	# Arrival-cell override (portal chains): a cell inside a room of
+	# the DESTINATION floor is allowed; anything else is refused.
+	_expect(bool(_fm.can_place_portal(Vector2i(6, 6), &"pt_b",
+			Vector2i(3, 3)).get("allowed", false)),
+		"arrival cell inside dest room refused")
+	_expect(not bool(_fm.can_place_portal(Vector2i(6, 6), &"pt_b",
+			Vector2i(100, 100)).get("allowed", false)),
+		"arrival cell outside dest rooms allowed")
+	_expect(_fm.place_portal(Vector2i(6, 6), &"pt_b", Vector2i(3, 3)),
+		"place_portal with arrival failed")
+	var arrival_portal := _fm.portal_at(Vector2i(6, 6))
+	_expect(arrival_portal != null
+		and arrival_portal.destination_world_cell == Vector2i(3, 3),
+		"arrival cell not stored on portal")
+	# Retarget validates and rewrites the arrival override.
+	_expect(_fm.update_portal_destination(Vector2i(6, 6), &"pt_b",
+			FloorPortal.NO_DESTINATION_CELL), "arrival clear failed")
+	_expect(_fm.portal_at(Vector2i(6, 6)) != null
+		and _fm.portal_at(Vector2i(6, 6)).destination_world_cell \
+			== FloorPortal.NO_DESTINATION_CELL,
+		"arrival override not cleared")
+	_expect(not _fm.update_portal_destination(Vector2i(6, 6), &"pt_b",
+			Vector2i(100, 100)), "bad arrival cell accepted")
+	_expect(_fm.portal_at(Vector2i(6, 6)).destination_world_cell \
+			== FloorPortal.NO_DESTINATION_CELL,
+		"refused arrival cell was still stored")
+	_expect(_fm.update_portal_destination(Vector2i(6, 6), &"pt_b",
+			Vector2i(4, 4)), "arrival set failed")
+	_expect(_fm.portal_at(Vector2i(6, 6)).destination_world_cell \
+			== Vector2i(4, 4), "arrival override wrong after set")
+	_expect(_fm.remove_portal(Vector2i(6, 6)), "arrival portal cleanup failed")
+	# Floor-scoped placement accepts the override too.
+	_expect(_fm.place_portal_on_floor(&"pt_b", Vector2i(7, 7), &"pt_a",
+			Vector2i(2, 2)), "place_portal_on_floor with arrival failed")
+	var on_floor_portal := _fm.portal_at_on_floor(&"pt_b", Vector2i(7, 7))
+	_expect(on_floor_portal != null
+		and on_floor_portal.destination_world_cell == Vector2i(2, 2),
+		"on-floor arrival override wrong")
+
 	# Dirty attribution + persistence: the non-active floor's layout
 	# was written and pt_b (not pt_a) is marked dirty.
 	_expect(FileAccess.file_exists(FloorSaveSystem.layout_path(&"pt_b")),
@@ -241,10 +308,24 @@ func _test_validation_and_lookup() -> void:
 
 func _test_persistence() -> void:
 	# pt_a currently has portals at (4,4)->pt_c and (5,5)->pt_c.
+	# Give (4,4) an arrival override so dest_cell round-trips too.
+	_expect(_fm.update_portal_destination(Vector2i(4, 4), &"pt_c",
+			Vector2i(3, 3)), "arrival override for persistence failed")
 	var layout := FloorSaveSystem.load_layout(&"pt_a")
 	var saved_portals: Array = layout.get("portals", [])
 	_expect(saved_portals.size() == 2, "layout.json portals size %d" % saved_portals.size())
 	_expect(FileAccess.file_exists(FloorSaveSystem.layout_path(&"pt_a")), "layout.json missing")
+	# JSON parses numbers as floats, so compare components, not arrays.
+	var dest_cell_saved := false
+	for raw in saved_portals:
+		if raw is Dictionary and str(raw.get("id", "")) == "portal_4_4":
+			var cell_arr: Array = raw.get("cell", [])
+			var dest_arr: Array = raw.get("dest_cell", [])
+			dest_cell_saved = cell_arr.size() == 2 \
+				and int(cell_arr[0]) == 4 and int(cell_arr[1]) == 4 \
+				and dest_arr.size() == 2 \
+				and int(dest_arr[0]) == 3 and int(dest_arr[1]) == 3
+	_expect(dest_cell_saved, "layout.json lost the portal dest_cell")
 
 	# Reload: portals must come back from disk.
 	var pt_a := _fm.get_floor(&"pt_a")
@@ -255,6 +336,9 @@ func _test_persistence() -> void:
 	var reloaded := _fm.portal_at(Vector2i(4, 4))
 	_expect(reloaded != null and reloaded.destination_floor_id == &"pt_c",
 		"reloaded portal dest wrong")
+	_expect(reloaded != null
+		and reloaded.destination_world_cell == Vector2i(3, 3),
+		"reloaded portal lost its arrival cell")
 
 	# Backward compatibility: a layout.json written before portals
 	# existed (no "portals" key) must load normally.
@@ -360,6 +444,10 @@ func _test_trigger_setup() -> void:
 	# pending switch; stepping on the second must NOT retrigger.
 	_expect(_fm.place_portal(Vector2i(4, 4), &"pt_b"), "trigger portal (4,4) failed")
 	_expect(_fm.place_portal(Vector2i(4, 5), &"pt_b"), "trigger portal (4,5) failed")
+	# Portal (4,4) carries an arrival override: global (5,5) on pt_b —
+	# which the chain stage later turns into portal B's cell.
+	_expect(_fm.update_portal_destination(Vector2i(4, 4), &"pt_b",
+			Vector2i(5, 5)), "trigger portal arrival override failed")
 	# Path: (2,2) -> (4,2) -> (4,4) -> (4,5). Both portal cells are
 	# stepped on while _floor_portal_pending is already true.
 	_walk_to(Vector2i(4, 4))
@@ -376,8 +464,10 @@ func _test_trigger_result() -> void:
 	if _player.room != null:
 		_expect(_player.room.room_coordinates == Vector2i(0, 0),
 			"player not in destination entry room: %s" % _player.room.room_coordinates)
-		_expect(_player.grid_position == Vector2i(2, 2),
-			"player not at destination spawn: %s" % _player.grid_position)
+		# Portal (4,4) had arrival override (5,5): the player lands on
+		# that exact cell of pt_b, not a random spawn point.
+		_expect(_player.grid_position == Vector2i(5, 5),
+			"player not at portal arrival cell: %s" % _player.grid_position)
 	else:
 		_failures.append("player has no room after portal transition")
 
@@ -395,9 +485,67 @@ func _test_stale_portal() -> void:
 	_expect(not _player._floor_portal_pending, "stale portal armed a transition")
 	_expect(_fm.active_floor != null and _fm.active_floor.floor_id == &"pt_b",
 		"stale portal switched floor")
+	# Remove the stale portal: an unregistered destination makes the
+	# whole floor fail validate_floor, which would break every later
+	# switch INTO pt_b (the chain legs below).
+	_expect(_fm.remove_portal(Vector2i(4, 4)), "stale portal cleanup failed")
 
 # ------------------------------------------------------------------
-# Stage 3: RoomConnection unchanged + Creation Mode editor
+# Portal chain: pt_a portal A (4,4) -> pt_b arriving on (5,5);
+# pt_b portal B (5,5) -> pt_a arriving on (4,4). Stepping onto each
+# portal lands the player ON the other portal's cell.
+# ------------------------------------------------------------------
+
+func _test_chain_leg1() -> void:
+	# pt_b is active; the player arrived on (5,5) via portal A's
+	# arrival override. Portal B goes on that same cell -> pt_a,
+	# arriving on portal A's cell (4,4).
+	_expect(_fm.active_floor != null and _fm.active_floor.floor_id == &"pt_b",
+		"chain leg1: pt_b not active")
+	# The stale-portal test left the player at (4,4); portal B sits at
+	# (5,5) — walking there steps onto it and fires the chain.
+	_expect(_fm.place_portal(Vector2i(5, 5), &"pt_a", Vector2i(4, 4)),
+		"chain portal B place failed")
+	_walk_to(Vector2i(5, 4))
+	_walk_to(Vector2i(5, 5))
+	_expect(_player._floor_portal_pending, "chain portal B did not arm")
+
+func _test_chain_leg1_result() -> void:
+	_expect(_fm.active_floor != null and _fm.active_floor.floor_id == &"pt_a",
+		"chain leg1 did not reach pt_a: %s" % \
+			str(_fm.active_floor.floor_id if _fm.active_floor != null else &"none"))
+	if _player.room != null:
+		_expect(_player.room.room_coordinates == Vector2i(0, 0),
+			"chain leg1 wrong room: %s" % _player.room.room_coordinates)
+		# Arrival override: standing ON portal A's cell (4,4).
+		_expect(_player.grid_position == Vector2i(4, 4),
+			"chain leg1 not on portal A cell: %s" % _player.grid_position)
+	else:
+		_failures.append("chain leg1: player has no room")
+
+func _test_chain_leg2() -> void:
+	# pt_a active; player stands on portal A (4,4). Step off and
+	# back on to fire it — portal A arrives on pt_b's (5,5), which
+	# is portal B's cell.
+	_walk_to(Vector2i(4, 3))
+	_walk_to(Vector2i(4, 4))
+	_expect(_player._floor_portal_pending, "chain portal A did not arm")
+
+func _test_chain_leg2_result() -> void:
+	_expect(_fm.active_floor != null and _fm.active_floor.floor_id == &"pt_b",
+		"chain leg2 did not reach pt_b: %s" % \
+			str(_fm.active_floor.floor_id if _fm.active_floor != null else &"none"))
+	if _player.room != null:
+		_expect(_player.room.room_coordinates == Vector2i(0, 0),
+			"chain leg2 wrong room: %s" % _player.room.room_coordinates)
+		# Full circle: back on portal B's cell (5,5).
+		_expect(_player.grid_position == Vector2i(5, 5),
+			"chain leg2 not on portal B cell: %s" % _player.grid_position)
+	else:
+		_failures.append("chain leg2: player has no room")
+
+# ------------------------------------------------------------------
+# Stage 6: RoomConnection unchanged + Creation Mode editor
 # ------------------------------------------------------------------
 
 func _test_connection_unchanged() -> void:

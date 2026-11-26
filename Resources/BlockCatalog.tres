@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockCatalog" load_steps=9 format=3]
+[gd_resource type="Resource" script_class="BlockCatalog" load_steps=33 format=3]
 
 [ext_resource type="Script" path="res://Scripts/Objects/BlockCatalog.gd" id="1"]
 [ext_resource type="Resource" path="res://Resources/Blocks/StandardBlock.tres" id="2"]
@@ -8,7 +8,31 @@
 [ext_resource type="Resource" path="res://Resources/Blocks/WoodLogBlock.tres" id="6"]
 [ext_resource type="Resource" path="res://Resources/Blocks/WhiteTilesBlock.tres" id="7"]
 [ext_resource type="Resource" path="res://Resources/Blocks/GreyConcreteBlock.tres" id="8"]
+[ext_resource type="Resource" path="res://Resources/Blocks/AsphaltBlock.tres" id="9"]
+[ext_resource type="Resource" path="res://Resources/Blocks/BathroomTerrazoBlock.tres" id="10"]
+[ext_resource type="Resource" path="res://Resources/Blocks/CautionSignalBlock.tres" id="11"]
+[ext_resource type="Resource" path="res://Resources/Blocks/CementBricksBlock.tres" id="12"]
+[ext_resource type="Resource" path="res://Resources/Blocks/CreamBottomWallBlock.tres" id="13"]
+[ext_resource type="Resource" path="res://Resources/Blocks/CyanBathroomWallBlock.tres" id="14"]
+[ext_resource type="Resource" path="res://Resources/Blocks/CyanBottomWallpaperBlock.tres" id="15"]
+[ext_resource type="Resource" path="res://Resources/Blocks/GlassBlock.tres" id="16"]
+[ext_resource type="Resource" path="res://Resources/Blocks/GreyTilesBlock.tres" id="17"]
+[ext_resource type="Resource" path="res://Resources/Blocks/LightWoodWallBlock.tres" id="18"]
+[ext_resource type="Resource" path="res://Resources/Blocks/MarbleBlock.tres" id="19"]
+[ext_resource type="Resource" path="res://Resources/Blocks/MetalBlock.tres" id="20"]
+[ext_resource type="Resource" path="res://Resources/Blocks/MetalCrateBlock.tres" id="21"]
+[ext_resource type="Resource" path="res://Resources/Blocks/MetalScaffoldingBlock.tres" id="22"]
+[ext_resource type="Resource" path="res://Resources/Blocks/OrangeBricksBlock.tres" id="23"]
+[ext_resource type="Resource" path="res://Resources/Blocks/StoneBricksBlock.tres" id="24"]
+[ext_resource type="Resource" path="res://Resources/Blocks/StrippedWoodBlock.tres" id="25"]
+[ext_resource type="Resource" path="res://Resources/Blocks/TransparentTilesBlock.tres" id="26"]
+[ext_resource type="Resource" path="res://Resources/Blocks/WhiteBricksBlock.tres" id="27"]
+[ext_resource type="Resource" path="res://Resources/Blocks/WhiteGreyTerrazoBlock.tres" id="28"]
+[ext_resource type="Resource" path="res://Resources/Blocks/WhiteWoodWallBlock.tres" id="29"]
+[ext_resource type="Resource" path="res://Resources/Blocks/WoodCrateBlock.tres" id="30"]
+[ext_resource type="Resource" path="res://Resources/Blocks/WoodPlankBlock.tres" id="31"]
+[ext_resource type="Resource" path="res://Resources/Blocks/WoodWallBlock.tres" id="32"]
 
 [resource]
 script = ExtResource("1")
-definitions = Array[Resource]([ExtResource("2"), ExtResource("3"), ExtResource("4"), ExtResource("5"), ExtResource("6"), ExtResource("7"), ExtResource("8")])
+definitions = Array[Resource]([ExtResource("2"), ExtResource("3"), ExtResource("4"), ExtResource("5"), ExtResource("6"), ExtResource("7"), ExtResource("8"), ExtResource("9"), ExtResource("10"), ExtResource("11"), ExtResource("12"), ExtResource("13"), ExtResource("14"), ExtResource("15"), ExtResource("16"), ExtResource("17"), ExtResource("18"), ExtResource("19"), ExtResource("20"), ExtResource("21"), ExtResource("22"), ExtResource("23"), ExtResource("24"), ExtResource("25"), ExtResource("26"), ExtResource("27"), ExtResource("28"), ExtResource("29"), ExtResource("30"), ExtResource("31"), ExtResource("32")])

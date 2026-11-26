@@ -433,7 +433,10 @@ func _trigger_floor_portal(local_cell: Vector2i) -> void:
 		return
 	_floor_portal_pending = true
 	var stepped_room := room
-	get_tree().create_timer(maxf(floor_portal_delay, 0.0)).timeout.connect(
+	# The delay must cover the step animation that just started, or the
+	# floor switch cuts the glide tween short and place_at visibly
+	# snaps the sprite the remaining fraction of a cell.
+	get_tree().create_timer(maxf(floor_portal_delay, move_duration)).timeout.connect(
 		_on_floor_portal_delay_elapsed.bind(world_cell, stepped_room))
 
 ## Deferred portal activation: fires after the step animation delay.
@@ -469,14 +472,19 @@ func _on_floor_portal_delay_elapsed(world_cell: Vector2i, stepped_room: Room) ->
 		return
 	# Single-player: run the switch under the transition slide when
 	# the overlay exists (it also locks input while it plays); fall
-	# back to a bare switch otherwise.
+	# back to a bare switch otherwise. A portal with an arrival cell
+	# (e.g. another portal for chains) lands there via switch_floor_at.
+	var do_switch := func() -> bool:
+		if portal.has_destination_cell():
+			return floor_manager.switch_floor_at(destination,
+				portal.destination_world_cell)
+		return floor_manager.switch_floor(destination)
 	var overlay := _transition_overlay()
 	if overlay != null:
-		if not bool(overlay.play_transition(
-				func() -> bool: return floor_manager.switch_floor(destination))):
+		if not bool(overlay.play_transition(do_switch)):
 			push_warning("Player: floor portal transition to '%s' failed; player stays put." % destination)
 		return
-	if not floor_manager.switch_floor(destination):
+	if not do_switch.call():
 		push_warning("Player: floor portal transition to '%s' failed; player stays put." % destination)
 
 func _multiplayer_manager() -> MultiplayerManager:

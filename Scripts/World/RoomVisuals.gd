@@ -231,11 +231,21 @@ func slide_all_out() -> int:
 ## Slides every currently visible room in from above — the "arrive
 ## from the top" half, played after the destination floor exists.
 ## Hidden rooms stay hidden; they appear later via normal visibility.
+## Rooms mid EXIT slide are the should-be-hidden set: their exit
+## tween keeps room.visible true until it finishes, so without this
+## check slide_all_in would kill the exit, slide them in, and leave
+## them visible forever (nothing re-evaluates visibility afterwards).
 func slide_all_in() -> int:
 	_bulk_exit_rooms.clear()
 	var count := 0
 	for room in _room_world.registry.get_rooms():
 		if room == null or not room.visible:
+			continue
+		var slide: Dictionary = _room_slide.get(room, {})
+		if bool(slide.get("exiting", false)):
+			_kill_room_slide(room)
+			room.position = _room_home.get(room, room.position)
+			room.visible = false
 			continue
 		_start_room_slide(room, false)
 		count += 1

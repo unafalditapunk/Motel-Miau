@@ -123,10 +123,63 @@ debug args: `--autowalk`, `--dump-world=N`, `--travel=`,
 `--floor-op=`, `--build-op=`, `--struct-op=`, `--autosave=N`,
 `--shutdown-after=N`, `--saves=<dir>` (per-instance save isolation).
 
+## Phase P4 — portal lifecycle & reliability hardening
+
+- **Deferred avatar spawning (P4.1)**: client `_pending_avatar_spawns`
+  queues the latest spawn/state per peer when the matching floor is
+  known but the room is not materialized yet (mid-rebuild, late
+  replica op). Retried every frame; one entry per peer so states can
+  never duplicate an avatar; cleared on despawn, floor change
+  (`_apply_transition_spawn`), and server disconnect. Wrong-floor
+  states are discarded, never queued — room ids collide across floors.
+- **Occupied-floor deletion (P4.2)**: intentionally rejected, not
+  evacuated. `_handle_floor_delete` checks `_bodies` occupancy BEFORE
+  any mutation (unregister, runtime-world release, save deletion) and
+  rejects `occupied`; the floor, its world, and all peer floors stay
+  untouched and the floor remains fully usable. A peer still inside
+  its join handshake (`_pending_peers`) blocks deletion of the
+  PRIMARY floor (`busy`) since its snapshot targets it. Clients surface
+  the reason via `floor_result` → FloorPanel status text.
+- **Transition recovery (P4.3)**: `_rpc_floor_transition_rejected`
+  now echoes the request `transition_id`; the client honors only a
+  rejection matching its live pending serial (unversioned id 0 still
+  applies — backwards compatible), so a late reject cannot clear a
+  newer pending transition. `_rpc_move_request` ignores move requests
+  while the sender has an unresolved in-flight transition, so packets
+  sent before the commit cannot drag the reparented body. Already
+  covered by P2.1 and re-verified: disconnect cleanup
+  (`_on_peer_disconnected` releases guard/body/peer_floor), snapshot
+  chunk/JSON/apply failure (`_abort_pending_transition`), destination
+  materialization failure (`load_failed` before any mutation), missing
+  spawn (`no_entry_room` before commit), duplicate requests (`busy`
+  guard + `TRANSITION_INFLIGHT_TIMEOUT_MS` expiry), client timeout
+  (`transition_timeout` + serial-matched watchdog).
+- **Listen-server host travel (P4.4)**: DEFERRED — see limitations.
+- **Authorization boundary (P4.5)**: documented below; no auth exists.
+
 ## Known limitations and deferred work
 
+- **No listen-server mode**: only dedicated `--server` and `--client`
+  exist. A host that is also a player would need a new mode: the host
+  would be peer 1 with an authoritative body AND a predicted local
+  avatar, self-applying snapshots, and input routing — none of which
+  exists today (the server's `_world.player` is a decorative node used
+  only for occupancy checks and spawn fallback). Deferred as an
+  architectural change, not a portal-lifecycle fix.
 - **No auth/encryption** — ENet is plaintext; anyone who can reach the
-  port can connect.
+  port can connect. Authorization boundary audit (P4.5): every
+  client-supplied value is revalidated server-side — transition
+  requests carry only a floor_id (must be a registered floor, not the
+  peer's current one) or a portal cell (destination AND the optional
+  arrival cell are derived from the portal definition on the peer's
+  authoritative floor, never from the packet — clients cannot pick a
+  landing cell); floor ops derive canonical definitions server-side and
+  validate ids/occupancy; structural/build ops validate against the
+  peer's tracked floor world. What is NOT protected: any connected
+  peer can create/delete floors and mutate any reachable floor — there
+  is no per-peer permission model. Before a public release: transport
+  encryption (DTLS), peer authentication, and per-floor or global
+  permission checks on floor/structural ops.
 - **No ownership/permissions** — every connected peer can mutate
   anything on floors they can reach (Phase E candidate).
 - **No evacuation on occupied-floor delete** — deletes reject while

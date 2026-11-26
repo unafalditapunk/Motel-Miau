@@ -395,6 +395,24 @@ func validate_floor(floor_def: Floor) -> Array[String]:
 		elif get_floor(portal.destination_floor_id) == null:
 			problems.append("portal '%s' destination floor '%s' is not registered" % [
 				portal.portal_id, portal.destination_floor_id])
+		if portal.has_destination_cell():
+			# The arrival override must land inside a room footprint
+			# of the DESTINATION floor — checked against that floor's
+			# specs, not this one (room ids collide across floors).
+			# Warn only, never a hard problem: the destination floor's
+			# layout can change after this portal was authored (e.g. the
+			# arrival room gets deleted), and a stale arrival cell is
+			# safe — arrival_placement_for_cell falls back to spawn
+			# placement at travel time. Failing validation here would
+			# make the whole SOURCE floor unloadable.
+			var dest_def := get_floor(portal.destination_floor_id)
+			if dest_def != null \
+					and not _arrival_cell_valid_on_floor(
+						portal.destination_floor_id, dest_def,
+						portal.destination_world_cell):
+				push_warning("FloorManager.validate_floor: portal '%s' arrival cell %s is not inside a room on floor '%s'; spawn fallback applies." % [
+					portal.portal_id, _id_text(portal.destination_world_cell),
+					portal.destination_floor_id])
 	return problems
 
 ## Specs with a resolvable footprint, paired with their union bounds
@@ -904,6 +922,21 @@ func load_floor_without_save(floor_id: StringName, target_world: RoomWorld = nul
 ##   3. Only then is the world rebuilt; a failed load triggers a
 ##      rollback attempt back to the previous floor.
 ## Switching to the already-active floor reloads it (save + load).
+## One-shot arrival override for the NEXT floor materialization:
+## portal travel sets this to land the player on a specific cell
+## (e.g. another portal) instead of a random spawn point. Consumed
+## and cleared by _ensure_player_placement.
+var _arrival_override_cell := FloorPortal.NO_DESTINATION_CELL
+
+## switch_floor variant for portal travel: lands the player on
+## world_cell of the destination floor when it resolves to a room
+## cell, falling back to normal spawn placement otherwise.
+func switch_floor_at(floor_id: StringName, world_cell: Vector2i) -> bool:
+	_arrival_override_cell = world_cell
+	var ok := switch_floor(floor_id)
+	_arrival_override_cell = FloorPortal.NO_DESTINATION_CELL
+	return ok
+
 func switch_floor(floor_id: StringName) -> bool:
 	if structural_edits_readonly():
 		_refuse_readonly("switch_floor")
@@ -1277,6 +1310,29 @@ func spawn_cell_room(floor_def: Floor, world_cell: Vector2i) -> FloorRoomSpec:
 			return spec
 	return null
 
+## True when world_cell sits inside a room footprint of the floor as
+## it will actually materialize. The on-disk layout.json wins over
+## the in-memory specs: a floor that has not been loaded yet this
+## session still carries its registration-time floor_def.json specs,
+## which can predate later layout edits — checking those produces
+## false "arrival cell outside rooms" warnings for valid portals.
+## Floors without a layout override (res:// content, MP replicas)
+## fall back to the live specs.
+func _arrival_cell_valid_on_floor(floor_id: StringName, floor_def: Floor,
+		world_cell: Vector2i) -> bool:
+	var layout := FloorSaveSystem.load_layout(floor_id)
+	var entries: Variant = layout.get("rooms")
+	if entries is Array and not (entries as Array).is_empty():
+		for entry in entries:
+			if not (entry is Dictionary):
+				continue
+			var spec := spec_from_layout_entry(entry)
+			if spec != null \
+					and _cell_in_sections(world_cell, _spec_sections(spec)):
+				return true
+		return false
+	return spawn_cell_room(floor_def, world_cell) != null
+
 ## Populates spawn_points from entry_room_id/spawn_position when the
 ## floor has none — the migration path for .tres floors and old saves.
 ## Idempotent; explicit lists are never touched.
@@ -1563,15 +1619,18 @@ func _portal_scan_connections(floor_def: Floor, world: RoomWorld) -> Array:
 ## the ACTIVE floor leading to destination_floor_id. Cell rules come
 ## from portal_cell_status; the destination must be another registered
 ## floor.
-func can_place_portal(world_cell: Vector2i, destination_floor_id: StringName) -> Dictionary:
+func can_place_portal(world_cell: Vector2i, destination_floor_id: StringName,
+		arrival_cell: Vector2i = FloorPortal.NO_DESTINATION_CELL) -> Dictionary:
 	if structural_edits_readonly():
 		return {"allowed": false, "reason": "Multiplayer client: edits are server-authoritative."}
 	if active_floor == null:
 		return {"allowed": false, "reason": "No active floor."}
-	return _can_place_portal(active_floor, room_world, world_cell, destination_floor_id, null)
+	return _can_place_portal(active_floor, room_world, world_cell,
+		destination_floor_id, null, arrival_cell)
 
 func _can_place_portal(floor_def: Floor, world: RoomWorld, world_cell: Vector2i,
-		destination_floor_id: StringName, exclude: FloorPortal) -> Dictionary:
+		destination_floor_id: StringName, exclude: FloorPortal,
+		arrival_cell: Vector2i = FloorPortal.NO_DESTINATION_CELL) -> Dictionary:
 	var cell_status := _portal_cell_status_for(floor_def, world, world_cell, exclude)
 	if not bool(cell_status.get("free", false)):
 		return {"allowed": false, "reason": cell_status.get("reason", "refused")}
@@ -1579,30 +1638,38 @@ func _can_place_portal(floor_def: Floor, world: RoomWorld, world_cell: Vector2i,
 		return {"allowed": false, "reason": "No destination floor selected."}
 	if destination_floor_id == floor_def.floor_id:
 		return {"allowed": false, "reason": "A portal cannot target its own floor."}
-	if get_floor(destination_floor_id) == null:
+	var dest_def := get_floor(destination_floor_id)
+	if dest_def == null:
 		return {"allowed": false, "reason": "Destination floor '%s' is not registered." % destination_floor_id}
+	if arrival_cell != FloorPortal.NO_DESTINATION_CELL \
+			and not _arrival_cell_valid_on_floor(destination_floor_id,
+				dest_def, arrival_cell):
+		return {"allowed": false, "reason": "Arrival cell %s is not inside a room on floor '%s'." % [
+			_id_text(arrival_cell), destination_floor_id]}
 	return {"allowed": true, "reason": ""}
 
 ## Places a portal at a global world cell on the active floor. The id
 ## derives deterministically from the cell — unique because one portal
 ## per cell is enforced. Persists layout.json and marks the floor dirty.
-func place_portal(world_cell: Vector2i, destination_floor_id: StringName) -> bool:
+func place_portal(world_cell: Vector2i, destination_floor_id: StringName,
+		arrival_cell: Vector2i = FloorPortal.NO_DESTINATION_CELL) -> bool:
 	if structural_edits_readonly():
 		_refuse_readonly("place_portal")
 		return false
 	if active_floor == null:
 		push_error("FloorManager.place_portal requires an active floor.")
 		return false
-	var verdict := can_place_portal(world_cell, destination_floor_id)
+	var verdict := can_place_portal(world_cell, destination_floor_id, arrival_cell)
 	if not bool(verdict.get("allowed", false)):
 		push_error("FloorManager.place_portal: %s" % verdict.get("reason", "refused"))
 		return false
-	return _place_portal(active_floor, world_cell, destination_floor_id, true)
+	return _place_portal(active_floor, world_cell, destination_floor_id, true, arrival_cell)
 
 ## Floor-scoped counterpart for runtime worlds (multiplayer). Server
 ## path: validates, mutates, persists, marks dirty.
 func place_portal_on_floor(floor_id: StringName, world_cell: Vector2i,
-		destination_floor_id: StringName) -> bool:
+		destination_floor_id: StringName,
+		arrival_cell: Vector2i = FloorPortal.NO_DESTINATION_CELL) -> bool:
 	if structural_edits_readonly():
 		_refuse_readonly("place_portal_on_floor")
 		return false
@@ -1611,14 +1678,15 @@ func place_portal_on_floor(floor_id: StringName, world_cell: Vector2i,
 		push_error("FloorManager.place_portal_on_floor: unknown floor '%s'." % floor_id)
 		return false
 	var verdict := _can_place_portal(floor_def, world_for_floor(floor_id),
-		world_cell, destination_floor_id, null)
+		world_cell, destination_floor_id, null, arrival_cell)
 	if not bool(verdict.get("allowed", false)):
 		push_error("FloorManager.place_portal_on_floor: %s" % verdict.get("reason", "refused"))
 		return false
-	return _place_portal(floor_def, world_cell, destination_floor_id, true)
+	return _place_portal(floor_def, world_cell, destination_floor_id, true, arrival_cell)
 
 func _place_portal(floor_def: Floor, world_cell: Vector2i,
-		destination_floor_id: StringName, persist: bool) -> bool:
+		destination_floor_id: StringName, persist: bool,
+		arrival_cell: Vector2i = FloorPortal.NO_DESTINATION_CELL) -> bool:
 	var spec := spawn_cell_room(floor_def, world_cell)
 	if spec == null:
 		return false
@@ -1627,6 +1695,7 @@ func _place_portal(floor_def: Floor, world_cell: Vector2i,
 	portal.room_id = spec.room_id
 	portal.world_cell = world_cell
 	portal.destination_floor_id = destination_floor_id
+	portal.destination_world_cell = arrival_cell
 	floor_def.portals.append(portal)
 	if persist:
 		_persist_room_layout(floor_def)
@@ -1687,7 +1756,8 @@ func _remove_portal(floor_def: Floor, world_cell: Vector2i, persist: bool) -> bo
 ## Retargets the portal at a global world cell to a new destination
 ## floor. The portal keeps its id/cell/room — only the destination
 ## changes. Validates the new destination like a fresh placement.
-func update_portal_destination(world_cell: Vector2i, destination_floor_id: StringName) -> bool:
+func update_portal_destination(world_cell: Vector2i, destination_floor_id: StringName,
+		arrival_cell: Vector2i = FloorPortal.NO_DESTINATION_CELL) -> bool:
 	if structural_edits_readonly():
 		_refuse_readonly("update_portal_destination")
 		return false
@@ -1698,14 +1768,16 @@ func update_portal_destination(world_cell: Vector2i, destination_floor_id: Strin
 	if portal == null:
 		push_error("FloorManager.update_portal_destination: no portal on that cell.")
 		return false
-	if portal.destination_floor_id == destination_floor_id:
+	if portal.destination_floor_id == destination_floor_id \
+			and portal.destination_world_cell == arrival_cell:
 		return true
 	var verdict := _can_place_portal(active_floor, room_world, world_cell,
-		destination_floor_id, portal)
+		destination_floor_id, portal, arrival_cell)
 	if not bool(verdict.get("allowed", false)):
 		push_error("FloorManager.update_portal_destination: %s" % verdict.get("reason", "refused"))
 		return false
 	portal.destination_floor_id = destination_floor_id
+	portal.destination_world_cell = arrival_cell
 	_persist_room_layout(active_floor)
 	mark_floor_dirty(active_floor.floor_id)
 	return true
@@ -1953,6 +2025,27 @@ func _on_world_content_changed(world: RoomWorld) -> void:
 ## placement (single-player/snapshot) and the multiplayer transition
 ## path so both sides agree on the rule — the actual pick differs per
 ## call, which is the point: each player gets their own random entry.
+## Resolves a portal's optional arrival override to a {room, cell}
+## placement on the given world, or {} when the cell is unusable —
+## callers fall back to spawn_placement_for. The cell must sit inside
+## a room footprint (shaped-room holes snap to the nearest real cell,
+## same rule as spawn placement).
+func arrival_placement_for_cell(floor_def: Floor, world: RoomWorld,
+		world_cell: Vector2i) -> Dictionary:
+	if floor_def == null or world == null \
+			or world_cell == FloorPortal.NO_DESTINATION_CELL:
+		return {}
+	var spec := spawn_cell_room(floor_def, world_cell)
+	if spec == null:
+		return {}
+	var room := world.get_room(spec.room_id)
+	if room == null:
+		return {}
+	var local: Vector2i = world_cell - spec.global_origin
+	if not room.has_cell(local):
+		local = _nearest_room_cell(room, local)
+	return {"room": room, "cell": local}
+
 func spawn_placement_for(floor_def: Floor, world: RoomWorld) -> Dictionary:
 	if floor_def == null or world == null:
 		return {}
@@ -1995,10 +2088,18 @@ func spawn_placement_for(floor_def: Floor, world: RoomWorld) -> Dictionary:
 ## (spawn_placement_for) — saved player_state no longer resumes a
 ## previous position; spawn points are the only entries.
 func _ensure_player_placement(world: RoomWorld, floor_def: Floor) -> void:
+	# Consume the one-shot arrival override up front so it can never
+	# leak into a later placement when no player exists.
+	var arrival_cell := _arrival_override_cell
+	_arrival_override_cell = FloorPortal.NO_DESTINATION_CELL
 	var player := _player()
 	if player == null:
 		return
-	var placement := spawn_placement_for(floor_def, world)
+	var placement := {}
+	if arrival_cell != FloorPortal.NO_DESTINATION_CELL:
+		placement = arrival_placement_for_cell(floor_def, world, arrival_cell)
+	if placement.is_empty():
+		placement = spawn_placement_for(floor_def, world)
 	if placement.is_empty():
 		push_warning("FloorManager: floor '%s' has no rooms; player left unplaced." % floor_def.floor_id)
 		return

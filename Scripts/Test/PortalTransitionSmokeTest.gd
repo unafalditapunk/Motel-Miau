@@ -200,6 +200,50 @@ func _run_checks() -> void:
 	# Destination spawn: body A stands in a floor_b room at a spawn.
 	_expect(body_a.room != null, "body A has no room after portal transition")
 
+	# --- portal arrival-cell override (portal chains) -----------------
+	# Peer 11 portals motel -> floor_c arriving on global cell (3,3) —
+	# inside floor_c room (0,0) — instead of a random spawn point.
+	var body_d: Player = _mm._spawn_body(11)
+	_expect(body_d != null, "arrival-test body failed to spawn")
+	if body_d != null:
+		_mm._peer_floor[11] = &"motel"
+		var arrival_cell := Vector2i(3, 3)
+		var placed_cell := Vector2i.ZERO
+		var base_cell := body_d.room.world_cell_coordinates(body_d.grid_position)
+		for dy in range(-1, 2):
+			for dx in range(-1, 2):
+				var wc := base_cell + Vector2i(dx, dy)
+				if fm.place_portal_on_floor(&"motel", wc, &"floor_c",
+						arrival_cell):
+					placed_cell = wc
+					break
+			if placed_cell != Vector2i.ZERO:
+				break
+		_expect(placed_cell != Vector2i.ZERO,
+			"could not place arrival-override portal")
+		if placed_cell != Vector2i.ZERO:
+			# Stand the body on the portal cell.
+			var p_room := motel_world.get_room_at_global_cell(placed_cell)
+			_expect(p_room != null, "arrival portal cell not in a motel room")
+			if p_room != null:
+				var p_local := placed_cell - p_room.cell_origin
+				body_d.room = p_room
+				body_d.block_layer = p_room.block_layer
+				body_d.room_size = p_room.size
+				body_d.place_at(p_local, body_d.stand_elevation_at(p_local))
+				_mm._handle_portal_transition(11, placed_cell)
+				_expect(_mm._peer_floor.get(11) == &"floor_c",
+					"arrival-override portal transition failed")
+				var floor_c_world: RoomWorld = fm.world_for_floor(&"floor_c")
+				_expect(body_d.room_world == floor_c_world,
+					"arrival body not in floor_c world")
+				if body_d.room != null:
+					_expect(body_d.room.room_coordinates == Vector2i(0, 0),
+						"arrival body wrong room: %s" % body_d.room.room_coordinates)
+					_expect(body_d.grid_position == \
+							arrival_cell - body_d.room.cell_origin,
+						"arrival body not on override cell: %s" % body_d.grid_position)
+
 	# --- in-flight guard: pipelined request right after commit ---------
 	# Peer 7 just transitioned; an immediate second request must be
 	# refused as busy and leave the peer on floor_b.

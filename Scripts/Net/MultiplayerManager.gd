@@ -76,6 +76,12 @@ var _peer_floor := {}
 ## join snapshot and every accepted transition. Avatar spawn/state and
 ## build-result payloads are filtered against it.
 var _my_floor_id := &""
+## Client: peer_id -> latest avatar spawn state that could not apply
+## yet (floor matches but the room/world was not materialized when the
+## state arrived). One entry per peer — newer states overwrite older
+## ones, so a queued spawn can never duplicate an avatar. Retried each
+## frame; cleared on despawn, floor change, and disconnect.
+var _pending_avatar_spawns := {}
 ## Client: a transition request is in flight — input and build requests
 ## stay locked until the destination snapshot applies or a rejection
 ## arrives.
@@ -257,6 +263,9 @@ func setup(world: WorldBootstrap, args: Dictionary) -> void:
 func _process(delta: float) -> void:
 	if mode == Mode.CLIENT:
 		_update_avatar_visibility()
+		if not _pending_avatar_spawns.is_empty():
+			for peer_id in _pending_avatar_spawns.keys():
+				_try_avatar_spawn(peer_id)
 	# --dump-world: print the live world once — on the server as soon
 	# as it boots, on a client only after the snapshot applied, so the
 	# two dumps can be diffed to verify replication.
@@ -612,6 +621,7 @@ func _on_server_disconnected() -> void:
 		if is_instance_valid(avatar):
 			avatar.queue_free()
 	_avatars.clear()
+	_pending_avatar_spawns.clear()
 
 func _local_player() -> Player:
 	return _world.player if _world != null else null
@@ -646,6 +656,9 @@ func _room_for_id(room_id: Vector2i) -> Room:
 func _apply_transition_spawn(spawn: Variant) -> void:
 	for peer_id in _avatars.keys():
 		_remove_avatar(peer_id)
+	# Queued spawns belonged to the floor we just left; occupants of
+	# the new floor arrive via rpc_id spawn states right after this.
+	_pending_avatar_spawns.clear()
 	var player := _local_player()
 	if player == null or not (spawn is Dictionary):
 		return
@@ -721,6 +734,51 @@ func _spawn_avatar(peer_id: int, floor_id: StringName, room_id: Vector2i,
 	print("MultiplayerManager: avatar for peer %d spawned at %s cell %s." % [
 		peer_id, room.room_coordinates, cell])
 
+## Routes an avatar spawn/state through the deferred-spawn queue.
+## The spawn applies immediately when possible; otherwise the LATEST
+## state is kept per peer and retried until the room materializes —
+## a state arriving while the world is mid-rebuild must never be
+## silently dropped (the peer would stay invisible until moving again).
+## States for floors this client is not on are discarded, and so is
+## any queued spawn for that peer: it can only belong to the floor we
+## just left.
+func _request_avatar_spawn(peer_id: int, floor_id: StringName,
+		room_id: Vector2i, cell: Vector2i, cell_elevation: float,
+		face: Vector2i) -> void:
+	if _avatars.has(peer_id):
+		_pending_avatar_spawns.erase(peer_id)
+		return
+	if _my_floor_id != &"" and floor_id != _my_floor_id:
+		_pending_avatar_spawns.erase(peer_id)
+		return
+	_pending_avatar_spawns[peer_id] = {
+		"floor_id": floor_id, "room_id": room_id, "cell": cell,
+		"elevation": cell_elevation, "face": face}
+	_try_avatar_spawn(peer_id)
+
+## Retries one queued spawn. Drops the entry when the avatar already
+## exists or the queued floor is no longer ours; keeps it while the
+## world/room simply is not materialized yet.
+func _try_avatar_spawn(peer_id: int) -> void:
+	var pending: Variant = _pending_avatar_spawns.get(peer_id)
+	if not (pending is Dictionary):
+		return
+	var floor_id := StringName(str(pending.get("floor_id", "")))
+	if _avatars.has(peer_id) \
+			or (_my_floor_id != &"" and floor_id != _my_floor_id):
+		_pending_avatar_spawns.erase(peer_id)
+		return
+	if not world_synced or _world == null or _world.room_world == null \
+			or _player_scene == null:
+		return
+	_spawn_avatar(peer_id, floor_id,
+		_pending_avatar_spawns[peer_id]["room_id"],
+		_pending_avatar_spawns[peer_id]["cell"],
+		float(pending.get("elevation", 0.0)),
+		pending.get("face", Vector2i.ZERO))
+	if _avatars.has(peer_id):
+		_pending_avatar_spawns.erase(peer_id)
+
 ## Remote avatars follow room visibility: a player is only drawn
 ## where their room is revealed to the local player (current room or
 ## visible neighbors; hidden/concealed rooms hide their occupants).
@@ -738,6 +796,7 @@ func _update_avatar_visibility() -> void:
 			and visuals.is_room_revealed(avatar.room)
 
 func _remove_avatar(peer_id: int) -> void:
+	_pending_avatar_spawns.erase(peer_id)
 	var avatar: Player = _avatars.get(peer_id)
 	if avatar != null and is_instance_valid(avatar):
 		avatar.queue_free()
@@ -1048,9 +1107,23 @@ func _release_transition_guard(peer_id: int, transition_id: int) -> void:
 		_transition_inflight.erase(peer_id)
 
 ## Server -> requester only: transition refused; local input unlocks.
+## transition_id is the request serial echoed by the server — the
+## client only honors a rejection matching its LIVE pending request,
+## so a late reject for an older request cannot clear a newer one.
 @rpc("authority", "call_remote", "reliable")
-func _rpc_floor_transition_rejected(reason: StringName) -> void:
+func _rpc_floor_transition_rejected(reason: StringName, transition_id := 0) -> void:
 	if multiplayer.is_server():
+		return
+	_handle_transition_rejected(reason, transition_id)
+
+## Client-side transition rejection. transition_id is the request
+## serial echoed by the server — only a rejection matching the LIVE
+## pending request is honored, so a late reject for an older request
+## cannot clear a newer pending transition or emit a bogus result.
+func _handle_transition_rejected(reason: StringName, transition_id := 0) -> void:
+	if not _transition_pending:
+		return
+	if transition_id != 0 and transition_id != _transition_request_serial:
 		return
 	_transition_pending = false
 	if _world != null and _world.player != null:
@@ -1061,8 +1134,9 @@ func _rpc_floor_transition_rejected(reason: StringName) -> void:
 	_flush_pending_struct_ops()
 	_flush_pending_build_ops()
 
-func _reject_transition(peer_id: int, reason: StringName) -> void:
-	_rpc_floor_transition_rejected.rpc_id(peer_id, reason)
+func _reject_transition(peer_id: int, reason: StringName,
+		transition_id := 0) -> void:
+	_rpc_floor_transition_rejected.rpc_id(peer_id, reason, transition_id)
 	print("MultiplayerManager: floor transition for peer %d rejected: %s" % [
 		peer_id, reason])
 
@@ -1080,46 +1154,51 @@ func _reject_transition(peer_id: int, reason: StringName) -> void:
 func _handle_portal_transition(peer_id: int, world_cell: Vector2i,
 		transition_id := 0) -> void:
 	if _shutting_down:
-		_reject_transition(peer_id, &"shutting_down")
+		_reject_transition(peer_id, &"shutting_down", transition_id)
 		return
 	var body: Player = _bodies.get(peer_id)
 	if body == null:
-		_reject_transition(peer_id, &"not_ready")
+		_reject_transition(peer_id, &"not_ready", transition_id)
 		return
 	var fm := _world.floor_manager if _world != null else null
 	if fm == null:
-		_reject_transition(peer_id, &"no_floor_manager")
+		_reject_transition(peer_id, &"no_floor_manager", transition_id)
 		return
 	var peer_floor := _floor_id_for_peer(peer_id)
 	var floor_def := fm.get_floor(peer_floor)
 	if floor_def == null:
-		_reject_transition(peer_id, &"unknown_floor")
+		_reject_transition(peer_id, &"unknown_floor", transition_id)
 		return
 	var portal := fm.portal_at_on_floor(peer_floor, world_cell)
 	if portal == null:
-		_reject_transition(peer_id, &"no_portal")
+		_reject_transition(peer_id, &"no_portal", transition_id)
 		return
 	if body.room == null:
-		_reject_transition(peer_id, &"no_body_room")
+		_reject_transition(peer_id, &"no_body_room", transition_id)
 		return
 	if body.room.world_cell_coordinates(body.grid_position) != portal.world_cell:
-		_reject_transition(peer_id, &"not_at_portal")
+		_reject_transition(peer_id, &"not_at_portal", transition_id)
 		return
 	var destination := portal.destination_floor_id
 	if destination == peer_floor:
-		_reject_transition(peer_id, &"already_there")
+		_reject_transition(peer_id, &"already_there", transition_id)
 		return
 	if fm.get_floor(destination) == null:
-		_reject_transition(peer_id, &"unknown_floor")
+		_reject_transition(peer_id, &"unknown_floor", transition_id)
 		return
-	_handle_floor_transition(peer_id, destination, transition_id)
+	# Portal arrival override (destination_world_cell) is server data —
+	# the client never sends it, so a forged request cannot pick an
+	# arbitrary landing cell either.
+	_handle_floor_transition(peer_id, destination, transition_id,
+		portal.destination_world_cell)
 
 ## Validates and applies a floor transition for one peer. Every
 ## failure rejects without touching the peer's body or any world.
 func _handle_floor_transition(peer_id: int, floor_id: StringName,
-		transition_id := 0) -> void:
+		transition_id := 0,
+		arrival_cell: Vector2i = FloorPortal.NO_DESTINATION_CELL) -> void:
 	if _shutting_down:
-		_reject_transition(peer_id, &"shutting_down")
+		_reject_transition(peer_id, &"shutting_down", transition_id)
 		return
 	# In-flight guard: while a peer's previous transition is
 	# unresolved (committed but not yet acked by the client via
@@ -1131,24 +1210,24 @@ func _handle_floor_transition(peer_id: int, floor_id: StringName,
 	var inflight: Variant = _transition_inflight.get(peer_id)
 	if inflight is Dictionary:
 		if now - int(inflight.get("msec", 0)) < TRANSITION_INFLIGHT_TIMEOUT_MS:
-			_reject_transition(peer_id, &"busy")
+			_reject_transition(peer_id, &"busy", transition_id)
 			return
 		_transition_inflight.erase(peer_id)
 	var body: Player = _bodies.get(peer_id)
 	if body == null:
-		_reject_transition(peer_id, &"not_ready")
+		_reject_transition(peer_id, &"not_ready", transition_id)
 		return
 	var fm := _world.floor_manager
 	if fm == null:
-		_reject_transition(peer_id, &"no_floor_manager")
+		_reject_transition(peer_id, &"no_floor_manager", transition_id)
 		return
 	var dest_def := fm.get_floor(floor_id)
 	if dest_def == null:
-		_reject_transition(peer_id, &"unknown_floor")
+		_reject_transition(peer_id, &"unknown_floor", transition_id)
 		return
 	var current_id := _floor_id_for_peer(peer_id)
 	if current_id == floor_id:
-		_reject_transition(peer_id, &"already_there")
+		_reject_transition(peer_id, &"already_there", transition_id)
 		return
 	# Destination world: reuse the live instance or materialize the
 	# floor into a fresh configured RoomWorld (first visit pays the
@@ -1159,19 +1238,25 @@ func _handle_floor_transition(peer_id: int, floor_id: StringName,
 		if dest_world == null or not fm.materialize_runtime_floor(floor_id, dest_world):
 			if dest_world != null:
 				dest_world.queue_free()
-			_reject_transition(peer_id, &"load_failed")
+			_reject_transition(peer_id, &"load_failed", transition_id)
 			return
 	# Persist the floor being left (rooms + connections only — player
 	# positions are not world state and bodies have no save format).
 	var out_world := _world_for_floor(current_id)
 	if out_world != null and out_world != dest_world:
 		out_world.save_room_states()
-	# Rebind the body into the destination world at a random spawn
-	# point (spawn_placement_for — same rule as single-player floor
-	# entries; the pick is per-player and shipped in the snapshot).
-	var placement := fm.spawn_placement_for(dest_def, dest_world)
+	# Rebind the body into the destination world. Portal travel may
+	# carry an arrival override (another portal's cell); F7/panel
+	# travel and unresolvable cells fall back to a random spawn point
+	# (spawn_placement_for — same rule as single-player floor entries;
+	# the pick is per-player and shipped in the snapshot).
+	var placement := {}
+	if arrival_cell != FloorPortal.NO_DESTINATION_CELL:
+		placement = fm.arrival_placement_for_cell(dest_def, dest_world, arrival_cell)
 	if placement.is_empty():
-		_reject_transition(peer_id, &"no_entry_room")
+		placement = fm.spawn_placement_for(dest_def, dest_world)
+	if placement.is_empty():
+		_reject_transition(peer_id, &"no_entry_room", transition_id)
 		return
 	var entry: Room = placement["room"]
 	var spawn: Vector2i = placement["cell"]
@@ -1180,7 +1265,7 @@ func _handle_floor_transition(peer_id: int, floor_id: StringName,
 	# no reparent and no floor change.
 	var snapshot := WorldSnapshot.build(fm, dest_world, dest_def)
 	if snapshot.is_empty():
-		_reject_transition(peer_id, &"snapshot_failed")
+		_reject_transition(peer_id, &"snapshot_failed", transition_id)
 		return
 	# Set the peer's floor BEFORE place_at: it emits
 	# authoritative_state_changed, and _on_body_state_changed resolves
@@ -1888,6 +1973,13 @@ func _handle_floor_delete(peer_id: int, op_id: int, fm: FloorManager,
 		if _floor_id_for_peer(other_id) == floor_id:
 			_reject_floor(peer_id, op_id, &"occupied")
 			return
+	# A peer still inside its join handshake is about to occupy the
+	# primary floor (its snapshot was built for it). Deleting that
+	# floor mid-handshake would strand the joiner on a floor the
+	# catalog no longer knows.
+	if floor_id == _primary_floor_id() and not _pending_peers.is_empty():
+		_reject_floor(peer_id, op_id, &"busy")
+		return
 	# Active-floor delete: switch the bound world to a fallback first
 	# (same discipline as FloorManager.delete_floor), then migrate any
 	# bodies parked in the fallback's runtime world into the bound
@@ -2222,6 +2314,15 @@ func _rpc_move_request(direction: Vector2i) -> void:
 	var body: Player = _bodies.get(sender)
 	if body == null:
 		return
+	# A peer with an unresolved transition has already been reparented
+	# into the destination world — move requests still in flight from
+	# before the commit must not drag the body (or broadcast stale
+	# room ids) mid-transition.
+	var inflight: Variant = _transition_inflight.get(sender)
+	if inflight is Dictionary \
+			and Time.get_ticks_msec() - int(inflight.get("msec", 0)) \
+				< TRANSITION_INFLIGHT_TIMEOUT_MS:
+		return
 	body.request_move(direction)
 
 ## Server -> joiner only: authoritative spawn plus everyone already here.
@@ -2234,7 +2335,7 @@ func _rpc_welcome(room_id: Vector2i, cell: Vector2i, cell_elevation: float,
 	for entry in states:
 		# entries: [peer_id, floor_id, room_id, cell, elev, face]
 		if entry is Array and entry.size() >= 6:
-			_spawn_avatar(int(entry[0]), StringName(str(entry[1])), entry[2],
+			_request_avatar_spawn(int(entry[0]), StringName(str(entry[1])), entry[2],
 				entry[3], entry[4], entry[5])
 
 ## Server -> all clients: a player entered the world (or a floor the
@@ -2244,7 +2345,7 @@ func _rpc_spawn_player(peer_id: int, floor_id: StringName, room_id: Vector2i,
 		cell: Vector2i, cell_elevation: float, face: Vector2i) -> void:
 	if multiplayer.is_server() or peer_id == my_peer_id:
 		return
-	_spawn_avatar(peer_id, floor_id, room_id, cell, cell_elevation, face)
+	_request_avatar_spawn(peer_id, floor_id, room_id, cell, cell_elevation, face)
 
 ## Server -> all clients: authoritative grid state for a peer.
 @rpc("authority", "call_remote", "reliable")
@@ -2261,7 +2362,7 @@ func _rpc_player_state(peer_id: int, floor_id: StringName, room_id: Vector2i,
 		return
 	var avatar: Player = _avatars.get(peer_id)
 	if avatar == null:
-		_spawn_avatar(peer_id, floor_id, room_id, cell, cell_elevation, face)
+		_request_avatar_spawn(peer_id, floor_id, room_id, cell, cell_elevation, face)
 		return
 	avatar.network_apply_state(_room_for_id(room_id), cell, cell_elevation, face)
 

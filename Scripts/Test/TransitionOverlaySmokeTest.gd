@@ -122,8 +122,17 @@ func _sp_success_finish() -> void:
 	_expect(not _player.local_input_locked, "input still locked after slide-in")
 	_expect(_completed == [true], "transition_completed did not report success")
 
+## The fake switches stand in for switch_floor/snapshot apply, which
+## rebuild the world — fresh Room instances carry no slide state.
+## Kill the stale exit slide so slide_all_in sees the room the way
+## production does after a real world swap.
+func _simulate_world_swap() -> void:
+	_world.visuals._kill_room_slide(_room)
+	_room.visible = true
+
 func _fake_switch_ok() -> bool:
 	_called[0] = true
+	_simulate_world_swap()
 	return true
 
 func _fake_switch_fail() -> bool:
@@ -131,6 +140,7 @@ func _fake_switch_fail() -> bool:
 
 func _fake_switch_nested() -> bool:
 	_called[1] = true
+	_simulate_world_swap()
 	return true
 
 func _sp_failure_and_busy() -> void:
@@ -178,7 +188,7 @@ func _mp_waiting_checks() -> void:
 	# The accepted snapshot would have swapped in a fresh visible
 	# world; simulate that before resolving so slide_all_in has a
 	# room to animate.
-	_room.visible = true
+	_simulate_world_swap()
 	_mm.transition_result.emit(true, &"")
 
 func _mp_rejection_start() -> void:

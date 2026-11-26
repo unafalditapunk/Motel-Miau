@@ -230,6 +230,8 @@ var _portal_panel: PanelContainer
 var _portal_panel_info: Label
 var _portal_panel_status: Label
 var _portal_panel_dest: OptionButton
+var _portal_panel_arrive: OptionButton
+var _portal_arrive_cells: Array[Vector2i] = []
 var _portal_panel_apply: Button
 var _portal_panel_delete: Button
 var _portal_panel_cell := Vector2i.ZERO
@@ -440,7 +442,19 @@ func _build_portal_panel() -> void:
 	_portal_panel_dest = OptionButton.new()
 	_portal_panel_dest.custom_minimum_size = Vector2(170.0, 0.0)
 	_portal_panel_dest.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_portal_panel_dest.item_selected.connect(_on_portal_dest_selected)
 	dest_row.add_child(_portal_panel_dest)
+	var arrive_row := HBoxContainer.new()
+	arrive_row.add_theme_constant_override(&"separation", 6)
+	box.add_child(arrive_row)
+	var arrive_caption := Label.new()
+	arrive_caption.text = "Arrive at:"
+	PixelUi.style_label(arrive_caption, PixelUi.TEXT_COLOR, 10)
+	arrive_row.add_child(arrive_caption)
+	_portal_panel_arrive = OptionButton.new()
+	_portal_panel_arrive.custom_minimum_size = Vector2(170.0, 0.0)
+	_portal_panel_arrive.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	arrive_row.add_child(_portal_panel_arrive)
 	_portal_panel_status = Label.new()
 	PixelUi.style_label(_portal_panel_status, Color(1.0, 0.6, 0.4), 10)
 	_portal_panel_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -856,6 +870,15 @@ func _open_portal_panel(world_cell: Vector2i) -> void:
 		select_index = 0
 	if select_index >= 0:
 		_portal_panel_dest.select(select_index)
+	# Arrival choices depend on the destination floor — populate for
+	# the preselected one, then restore the existing portal's cell.
+	_refresh_portal_arrive_options(_selected_portal_dest())
+	if _portal_panel_existing != null \
+			and _portal_panel_existing.has_destination_cell():
+		var arrive_index := _portal_arrive_cells.find(
+			_portal_panel_existing.destination_world_cell)
+		if arrive_index >= 0:
+			_portal_panel_arrive.select(arrive_index)
 	_portal_panel_info.text = "Cell (%d, %d)" % [world_cell.x, world_cell.y]
 	if _portal_panel_existing != null:
 		_portal_panel_info.text += "   Room (%d, %d)   Portal %s" % [
@@ -883,6 +906,35 @@ func _selected_portal_dest() -> StringName:
 		return &""
 	return _portal_dest_ids[index]
 
+## Destination-floor changes rebuild the arrival list: index 0 is
+## always "Random spawn"; each later entry is a portal on that floor,
+## which is how portal-to-portal chains are authored.
+func _on_portal_dest_selected(_index: int) -> void:
+	_refresh_portal_arrive_options(_selected_portal_dest())
+
+func _refresh_portal_arrive_options(dest_id: StringName) -> void:
+	_portal_panel_arrive.clear()
+	_portal_arrive_cells.clear()
+	_portal_panel_arrive.add_item("Random spawn")
+	_portal_arrive_cells.append(FloorPortal.NO_DESTINATION_CELL)
+	var floor_manager := _floor_manager()
+	var dest_def: Floor = floor_manager.get_floor(dest_id) \
+		if floor_manager != null else null
+	if dest_def != null:
+		for portal in dest_def.portals:
+			if portal == null:
+				continue
+			_portal_panel_arrive.add_item("Portal @ (%d, %d)" % [
+				portal.world_cell.x, portal.world_cell.y])
+			_portal_arrive_cells.append(portal.world_cell)
+	_portal_panel_arrive.select(0)
+
+func _selected_portal_arrive() -> Vector2i:
+	var index := _portal_panel_arrive.selected
+	if index < 0 or index >= _portal_arrive_cells.size():
+		return FloorPortal.NO_DESTINATION_CELL
+	return _portal_arrive_cells[index]
+
 ## Place or retarget: routes through the FloorManager portal APIs —
 ## the panel never touches floor_def.portals directly.
 func _on_portal_apply() -> void:
@@ -894,11 +946,13 @@ func _on_portal_apply() -> void:
 	if dest == &"":
 		_portal_panel_status.text = "Select a destination floor."
 		return
+	var arrival := _selected_portal_arrive()
 	var ok := false
 	if _portal_panel_existing != null:
-		ok = floor_manager.update_portal_destination(_portal_panel_cell, dest)
+		ok = floor_manager.update_portal_destination(
+			_portal_panel_cell, dest, arrival)
 	else:
-		ok = floor_manager.place_portal(_portal_panel_cell, dest)
+		ok = floor_manager.place_portal(_portal_panel_cell, dest, arrival)
 	if ok:
 		_set_notice("Portal %s -> %s." % [
 			"updated" if _portal_panel_existing != null else "placed", dest])

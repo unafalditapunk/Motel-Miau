@@ -124,8 +124,27 @@ func _on_floor_result(_op_id: int, accepted: bool, reason: StringName,
 		else:
 			_set_status("Deleted floor '%s'." % floor_id, false)
 	else:
-		_set_status("Floor op rejected: %s" % reason, true)
+		_set_status("Floor op rejected: %s" % _floor_op_reason_text(reason), true)
 	_rebuild_list()
+
+## Human-readable text for the StringName reasons the server sends
+## with floor-op rejections; unknown reasons pass through raw.
+static func _floor_op_reason_text(reason: StringName) -> String:
+	match reason:
+		&"occupied":
+			return "players are still on that floor"
+		&"busy":
+			return "the server is busy — try again"
+		&"unknown_floor":
+			return "unknown floor"
+		&"duplicate_floor":
+			return "a floor with that id already exists"
+		&"invalid_id":
+			return "invalid floor id"
+		&"not_ready":
+			return "not ready — try again"
+		_:
+			return String(reason)
 
 func _rebuild_list() -> void:
 	for child in _list_box.get_children():

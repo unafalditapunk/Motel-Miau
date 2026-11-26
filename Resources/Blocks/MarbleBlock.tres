@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="BlockDefinition" load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://Scripts/Objects/BlockDefinition.gd" id="1"]
+[ext_resource type="Texture2D" path="res://Assets/Sprites/Blocks/block_marble.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+object_id = &"marble"
+display_name = "Marble"
+footprint = Vector2i(1, 1)
+height = 1.0
+solid = true
+walkable = true
+requires_support = true
+sprite_texture = ExtResource("2")
