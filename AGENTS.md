@@ -141,13 +141,30 @@ bullets below.
   and to blocks on the same cell (tree order). Carpets also sort at
   surface depth so they always render above every tile; blocks still
   win over carpets via child order (BlockLayer is added last).
-- Texture filtering: all sprite `.import` files generate mipmaps.
+- Texture filtering / 0.5× zoom shimmer (recurring bug — read before
+  "fixing" zoom quality): all sprite `.import` files generate mipmaps.
   World-space sprites (tiles, carpets, markers, player, blocks,
   furniture, ghost) use `TEXTURE_FILTER_PARENT_NODE` and inherit the
   viewport default, which `WorldCamera._apply_zoom_level` switches per
-  zoom: NEAREST at ≥1×, LINEAR_WITH_MIPMAPS below 1× (the 0.5 overview)
-  so minified sprites sample averaged mips instead of aliasing.
+  zoom: NEAREST at ≥1×, NEAREST_WITH_MIPMAPS below 1× (the 0.5
+  overview). At exactly 0.5× the GPU picks mip level 1 — half-res,
+  sampled 1:1 — so texels stay crisp AND prefiltered (no crawling).
   PixelUi controls keep hard NEAREST (screen-space UI is not zoomed).
+  - Symptoms when broken: edges/details shimmer or crawl while the
+	camera moves at 0.5× only; 1×/2×/3× always look fine. It has been
+	reported multiple times and each time looked like a "regression"
+	but was NOT a code change — plain NEAREST at 0.5× minifies 2×2
+	texels into 1 pixel, so aliasing is inherent and gets more visible
+	as scene content density grows (more rooms/floors/sprites on
+	screen). Do not chase camera/filter/project-setting diffs first.
+  - If it regresses, check in order: (1) did a new sprite `.import`
+	lose `mipmaps/generate=true` or skip reimport? (2) did a sprite
+	script re-hardcode `TEXTURE_FILTER_NEAREST` instead of
+	PARENT_NODE? (3) was a new zoom level added below 1.0 that isn't
+    an exact mip divisor? (4) alpha-bleed halos on transparent sprites
+    at mip levels — cosmetic, fix via premultiplied alpha if reported.
+  - Never "fix" it by removing 0.5× from `zoom_levels` in
+    WorldBootstrap.tscn without asking — the overview zoom is wanted.
 - Connection markers: optional ground sprites at connection cells, drawn
   by `RoomVisuals` under each room's `ConnectionMarkers` node. Per
   connection `marker_texture` overrides the RoomWorld per-type exports

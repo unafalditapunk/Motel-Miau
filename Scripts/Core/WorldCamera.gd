@@ -107,14 +107,15 @@ func _apply_zoom_level() -> void:
 	var level := zoom_levels[current_zoom_index]
 	zoom = Vector2(level, level)
 	# Minified rendering (zoom < 1, e.g. the 0.5 overview) aliases
-	# badly under NEAREST — two texels share one screen pixel and
-	# edges crawl. Switch the viewport default to trilinear mipmaps
-	# only while zoomed out; sprites that set their own filter are
-	# unaffected, inheriting sprites get smooth minification.
+	# badly under plain NEAREST — two texels share one screen pixel
+	# and edges crawl. NEAREST_WITH_MIPMAPS picks the mip level that
+	# matches the minification (at 0.5x that's the half-res mip,
+	# sampled 1:1 → crisp texels, no shimmer). Inheriting sprites get
+	# it automatically; sprites with their own filter are unaffected.
 	var viewport := get_viewport()
 	if viewport != null:
 		viewport.canvas_item_default_texture_filter = \
-			Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS \
+			Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS \
 			if level < 1.0 \
 			else Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST
 
