@@ -206,7 +206,7 @@ bullets below.
     NEAREST_WITH_MIPMAPS=3 — note the swapped order vs older docs)
     plus a sweep of world `Sprite2D`s for non-PARENT_NODE filters.
     Fix: delete the stale `.ctex`/`.md5` under `.godot/imported/`
-    (or `find Assets -name '*.import'` → extract each `path=` dest
+	(or `find Assets -name '*.import'` → extract each `path=` dest
     and `rm` it), then `godot --headless --path . --import` to
     rebuild, then RESTART the game — a running instance keeps the
     old mip-less textures in memory and will keep shimmering even

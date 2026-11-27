@@ -33,8 +33,27 @@ func setup_furniture(definition: FurnitureDefinition, new_grid_position: Vector2
 	if sprite != null:
 		sprite.texture = definition.sprite_texture
 		sprite.rotation_degrees = float(posmod(furniture_rotation_degrees, 360))
+		_apply_sprite_offset()
 	_configure_collision()
 	_update_position()
+
+## Bottom-anchors the sprite to the ANCHOR cell's bottom vertex (the
+## cell the player clicked), not the footprint's front vertex: the
+## node origin sits at the footprint front for collision, so multi-cell
+## pieces lift the sprite by tile_height*(1 - (fx+fy)/2). That lift is
+## 0 for 1x1 (the classic -h/2 bottom anchor) and -tile_height for 2x2.
+func _apply_sprite_offset() -> void:
+	if sprite == null:
+		return
+	var texture := sprite.texture
+	if texture != null:
+		var texture_size := texture.get_size()
+		if texture_size.y > 0.0:
+			var span := float(footprint.x + footprint.y)
+			var lift := _tile_size().y * (1.0 - span * 0.5)
+			sprite.position = Vector2(0.0, lift - texture_size.y * 0.5)
+			return
+	sprite.position = SPRITE_OFFSET
 
 func _update_position() -> void:
 	if grid == null:

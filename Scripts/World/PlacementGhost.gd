@@ -61,7 +61,16 @@ func _process(_delta: float) -> void:
 	visible = true
 	_sprite.scale = Vector2.ONE
 	_sprite.texture = definition.sprite_texture
-	_sprite.position = FURNITURE_SPRITE_OFFSET if is_furniture else BLOCK_SPRITE_OFFSET
+	if is_furniture:
+		# Same anchor-cell bottom offset as Furniture._apply_sprite_offset.
+		var texture_size := _sprite.texture.get_size() if _sprite.texture != null else Vector2.ZERO
+		if texture_size.y > 0.0:
+			var lift := room.grid.tile_height * (1.0 - float(footprint.x + footprint.y) * 0.5)
+			_sprite.position = Vector2(0.0, lift - texture_size.y * 0.5)
+		else:
+			_sprite.position = FURNITURE_SPRITE_OFFSET
+	else:
+		_sprite.position = BLOCK_SPRITE_OFFSET
 	_sprite.rotation_degrees = float(rotation_deg)
 	_sprite.flip_h = _controller.flipped
 	_sprite.modulate = VALID_COLOR if valid else INVALID_COLOR
