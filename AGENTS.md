@@ -195,6 +195,24 @@ bullets below.
 	PARENT_NODE? (3) was a new zoom level added below 1.0 that isn't
     an exact mip divisor? (4) alpha-bleed halos on transparent sprites
     at mip levels — cosmetic, fix via premultiplied alpha if reported.
+    (5) STALE `.ctex` — the `.import` flag can read `generate=true`
+    while the compiled texture in `.godot/imported/` was built before
+    mipmaps were enabled (happens when `.import` files are patched by
+    script AFTER `--import` ran). The flag alone proves nothing —
+    verify the runtime state instead: a SceneTree probe that boots
+    `Main.tscn`, calls `camera.set_zoom_level(last)`, and prints
+    `camera.get_viewport().canvas_item_default_texture_filter`
+    (Godot 4.7 enum: NEAREST=0, LINEAR=1, LINEAR_WITH_MIPMAPS=2,
+    NEAREST_WITH_MIPMAPS=3 — note the swapped order vs older docs)
+    plus a sweep of world `Sprite2D`s for non-PARENT_NODE filters.
+    Fix: delete the stale `.ctex`/`.md5` under `.godot/imported/`
+    (or `find Assets -name '*.import'` → extract each `path=` dest
+    and `rm` it), then `godot --headless --path . --import` to
+    rebuild, then RESTART the game — a running instance keeps the
+    old mip-less textures in memory and will keep shimmering even
+    though the files on disk are correct. This exact stale-cache
+    case caused the 2026-11-27 recurrence: all flags/filters were
+    already correct, only the reimport + restart was missing.
   - Never "fix" it by removing 0.5× from `zoom_levels` in
     WorldBootstrap.tscn without asking — the overview zoom is wanted.
 - Player walk animation: all four directions have 8-frame cycles
