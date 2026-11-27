@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://wn2hnvsqvny4"
-path="res://.godot/imported/player_iso_down_left - copia.png-b9d2bcd39762c03b13cefe5ccff91cd6.ctex"
+uid="uid://dlxtxjmxj2w7c"
+path="res://.godot/imported/frame_000.png-52c0fbe55f45dabe91f663de549efce8.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://Assets/Sprites/Player/player_iso_down_left - copia.png"
-dest_files=["res://.godot/imported/player_iso_down_left - copia.png-b9d2bcd39762c03b13cefe5ccff91cd6.ctex"]
+source_file="res://Assets/Sprites/Player/animations/walking/south-west/frame_000.png"
+dest_files=["res://.godot/imported/frame_000.png-52c0fbe55f45dabe91f663de549efce8.ctex"]
 
 [params]
 
@@ -23,7 +23,7 @@ compress/rdo_quality_loss=0.0
 compress/hdr_compression=1
 compress/normal_map=0
 compress/channel_pack=0
-mipmaps/generate=true
+mipmaps/generate=false
 mipmaps/limit=-1
 roughness/mode=0
 roughness/src_normal=""

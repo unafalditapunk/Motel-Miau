@@ -165,6 +165,28 @@ bullets below.
     at mip levels — cosmetic, fix via premultiplied alpha if reported.
   - Never "fix" it by removing 0.5× from `zoom_levels` in
     WorldBootstrap.tscn without asking — the overview zoom is wanted.
+- Player walk animation: south-west (grid (0,1) = screen down-left)
+  and south-east (grid (1,0) = screen down-right, horizontally
+  mirrored SW frames) have cycles — 8 frames each loaded from
+  `Assets/Sprites/Player/animations/walking/<dir>/frame_*.png`
+  into a `walk_south_west` SpriteFrames animation (loop, one cycle
+  per two cell-steps). `Player.WALK_ANIMATION_DIRS` maps grid
+  direction → folder; add an entry to enable another direction (the
+  `north-west` folder already has frames). Walk frames reserve the
+  bottom of the canvas for the implied cell tile, so
+  `_walk_ground_offset` measures the foot line from pixels at startup
+  and `_animation_y_offset` shifts the visual down while a walk anim
+  plays — feet land on the same ground line as the idle sprites.
+  While `_is_moving` in a
+  mapped direction the walk anim plays; it returns to the facing idle
+  on `_finish_move`/`_cancel_movement`, and `_update_facing_animation`
+  skips re-playing an unchanged animation so chained steps loop
+  seamlessly. Held-key movement: `_start_move(direction, chained)`
+  marks steps continued from `_finish_move`'s buffered direction;
+  `_play_move` consumes `_chain_pending` into `_move_linear`, and
+  chained steps interpolate linearly (constant cell speed) instead of
+  the smoothstep ease used by isolated steps — holding a direction
+  reads as continuous motion, single taps still ease in/out.
 - Connection markers: optional ground sprites at connection cells, drawn
   by `RoomVisuals` under each room's `ConnectionMarkers` node. Per
   connection `marker_texture` overrides the RoomWorld per-type exports
@@ -254,6 +276,14 @@ bullets below.
   follow, keeps the normal gameplay zoom ladder), WASD/arrow +
   middle-drag pan, and `focus_on()`. Cursor cell = `grid.screen_to_grid(mouse world pos)` via
   `cursor_cell_for_world_position()` (injectable for headless tests).
+  Room overview camera: below 1× zoom (`_overview_zoom`), the camera
+  locks to the current room's padded bounds center
+  (`_overview_room_center`, computed from logical grid coords so slide
+  animations don't drag it) instead of following the player; it glides
+  to the center with `follow_smoothing`, holds still while the player
+  stays inside, glides to the new room's center on room change, and
+  snaps back to the player when zooming out of overview. Rooms too big
+  for the viewport fall back to normal follow.
   DebugHud adds a `Mode: CREATION` line with view + cursor cell.
   Creation Mode (Phase 2): the Create Room tool (C toggles, GRID view
   only) drags LMB rectangles on the global grid — each drag adds one

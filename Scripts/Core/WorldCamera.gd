@@ -27,6 +27,14 @@ var _pan_dragging := false
 var _pan_drag_last := Vector2.ZERO
 var _last_follow_pos := Vector2.ZERO
 var _follow_pos_valid := false
+var _overview_zoom := false
+var _overview_was_active := false
+
+## Padding (world px) added around a room's cell bounds when deciding
+## whether it fits the viewport in overview mode. Extra headroom on
+## top covers walls/furniture/tile art that rises above the diamonds.
+const OVERVIEW_PADDING := 16.0
+const OVERVIEW_TOP_PADDING := 48.0
 
 func _ready() -> void:
 	anchor_mode = Camera2D.ANCHOR_MODE_DRAG_CENTER
@@ -44,12 +52,30 @@ func _process(delta: float) -> void:
 	var target := _get_follow_target()
 	if target == null:
 		return
+	var was_overview := _overview_was_active
+	var overview: Variant = _overview_room_center(target)
+	_overview_was_active = overview != null
+	if overview != null:
+		# Room overview: glide to the room's center with the same
+		# smoothing as player follow. The target is constant while the
+		# player stays in the room, so the view holds still; entering
+		# a different room glides to the new center.
+		var k := 1.0 - exp(-follow_smoothing * delta)
+		global_position = global_position.lerp(overview, k)
+		if global_position.distance_to(overview) <= 0.25:
+			global_position = overview
+		_follow_pos_valid = true
+		_last_follow_pos = target.global_position
+		return
 	var desired := _desired_position(target)
 	# A teleport (floor portal, floor switch, room connection, spawn)
 	# moves the target farther than any single movement step — snap
-	# the camera instead of letting it glide across the world.
+	# the camera instead of letting it glide across the world. Leaving
+	# room overview also snaps: the locked view would otherwise glide
+	# all the way back to the player.
 	var teleported := not _follow_pos_valid \
-		or target.global_position.distance_to(_last_follow_pos) > follow_snap_distance
+		or target.global_position.distance_to(_last_follow_pos) > follow_snap_distance \
+		or was_overview
 	_follow_pos_valid = true
 	_last_follow_pos = target.global_position
 	if teleported or follow_smoothing <= 0.0:
@@ -67,6 +93,52 @@ func _desired_position(target: Node2D) -> Vector2:
 		desired.y = clampf(desired.y, center_bounds.position.y, center_bounds.end.y)
 	return desired
 
+## Room-overview camera target: while zoomed below 1x, returns the
+## canvas position that frames the player's current room — or null
+## when overview does not apply (zoomed in, no room, or the room is
+## too big to fit the viewport, in which case normal follow resumes).
+## Computed from logical grid coordinates, not node positions, so
+## room slide animations never drag the locked camera.
+func _overview_room_center(target: Node2D) -> Variant:
+	if not _overview_zoom:
+		return null
+	var room: Room = null
+	var room_world: RoomWorld = null
+	if target is Player:
+		room = (target as Player).room
+		room_world = (target as Player).room_world
+	if room_world == null or not is_instance_valid(room_world):
+		room_world = get_tree().get_first_node_in_group(&"room_worlds") as RoomWorld
+	if room_world == null:
+		return null
+	if room == null or not is_instance_valid(room):
+		room = room_world.get_room(room_world.primary_room_coordinates)
+	if room == null or room_world.grid == null:
+		return null
+	var bounds := _room_overview_bounds(room_world, room)
+	var view := get_viewport().get_visible_rect().size / maxf(zoom.x, 0.001)
+	if bounds.size.x > view.x or bounds.size.y > view.y:
+		return null
+	return room_world.to_global(bounds.get_center())
+
+## Screen-space bounds of a room's cell footprint, in RoomWorld local
+## coordinates, padded for the tall art that rises above the tiles.
+func _room_overview_bounds(room_world: RoomWorld, room: Room) -> Rect2:
+	var grid := room_world.grid
+	var origin := Vector2(room.cell_origin)
+	var size := Vector2(room.size)
+	var min_p := Vector2(INF, INF)
+	var max_p := Vector2(-INF, -INF)
+	for corner in [Vector2.ZERO, Vector2(size.x, 0.0), Vector2(0.0, size.y), size]:
+		var p := grid.grid_to_screen_position(origin + corner)
+		min_p = min_p.min(p)
+		max_p = max_p.max(p)
+	var rect := Rect2(min_p, max_p - min_p)
+	rect = rect.grow(OVERVIEW_PADDING)
+	rect.position.y -= OVERVIEW_TOP_PADDING
+	rect.size.y += OVERVIEW_TOP_PADDING
+	return rect
+
 ## Called by the follow target right after it teleports (place_at).
 ## Applies the same discontinuity rule as _process immediately, so a
 ## large jump snaps this frame instead of leaving one rendered frame
@@ -80,7 +152,7 @@ func notify_target_teleported() -> void:
 		or target.global_position.distance_to(_last_follow_pos) > follow_snap_distance
 	_follow_pos_valid = true
 	_last_follow_pos = target.global_position
-	if teleported:
+	if teleported and not _overview_zoom:
 		global_position = _desired_position(target)
 
 func _get_follow_target() -> Node2D:
@@ -106,6 +178,7 @@ func _apply_zoom_level() -> void:
 		return
 	var level := zoom_levels[current_zoom_index]
 	zoom = Vector2(level, level)
+	_overview_zoom = level < 1.0
 	# Minified rendering (zoom < 1, e.g. the 0.5 overview) aliases
 	# badly under plain NEAREST — two texels share one screen pixel
 	# and edges crawl. NEAREST_WITH_MIPMAPS picks the mip level that

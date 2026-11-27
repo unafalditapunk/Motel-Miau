@@ -25,9 +25,27 @@ var room_world: RoomWorld
 @export var hold_repeat_delay := 0.22
 @export var buffer_movement_input := true
 @export var sprite_bottom_offset := 0.0
+## How many frames each walk cycle uses. 0 = all available frames;
+## otherwise frames are sampled evenly across the cycle (e.g. 4 of 8
+## keeps the full stride at half the framerate). Experiment knob.
+@export var walk_frame_count := 8
 
 var _is_moving := false
 var _move_elapsed := 0.0
+var _move_direction := Vector2i.ZERO
+## True while the in-flight step is a held-key chain link: those glide
+## at constant velocity (linear) instead of smoothstep, so holding a
+## direction reads as continuous motion instead of pulse-per-cell.
+var _move_linear := false
+## Set by _start_move for the next _play_move call; consumed there.
+var _chain_pending := false
+## Extra y offset (px, positive = down) applied to the visual while a
+## walk animation plays. Walk frames reserve the bottom of the canvas
+## for the implied cell tile, so their feet sit higher in-frame than
+## the idle sprites — measured once at startup, see
+## _walk_ground_offsets.
+var _walk_ground_offsets: Dictionary = {}
+var _visual_base_y := 0.0
 var _move_from := Vector2.ZERO
 var _move_to := Vector2.ZERO
 var _move_elev_from := 0.0
@@ -128,6 +146,7 @@ func network_apply_state(target_room: Room, target_cell: Vector2i,
 	grid_position = target_cell
 	elevation = target_elevation
 	var to_screen := _screen_position_for_cell(target_cell, target_elevation)
+	_chain_pending = false
 	_play_move(from_screen, to_screen, from_elevation, target_elevation)
 
 func snap_to_surface() -> void:
@@ -186,6 +205,7 @@ func move_to(cell: Vector2i) -> bool:
 func _cancel_movement() -> void:
 	_is_moving = false
 	_move_elapsed = 0.0
+	_move_direction = Vector2i.ZERO
 	_buffered_direction = Vector2i.ZERO
 
 ## True while a modal world UI (FloorPanel), Creation Mode, or an
@@ -350,7 +370,8 @@ func _try_connection_transition(entry: Dictionary, from_screen: Vector2, from_el
 	authoritative_state_changed.emit()
 	return _play_move(from_screen, to_screen, previous_elevation, elevation)
 
-func _start_move(direction: Vector2i) -> bool:
+func _start_move(direction: Vector2i, chained := false) -> bool:
+	_chain_pending = chained
 	if _world_ui_blocked():
 		return false
 	var target := grid_position + direction
@@ -503,12 +524,15 @@ func _floor_manager() -> FloorManager:
 	return get_tree().get_first_node_in_group(&"floor_managers") as FloorManager
 
 func _play_move(from_screen: Vector2, to_screen: Vector2, from_elevation: float, to_elevation: float) -> bool:
+	_move_linear = _chain_pending
+	_chain_pending = false
 	if move_duration <= 0.0 or grid == null:
 		position = to_screen
 		_update_depth()
 		_is_moving = false
 		return true
 
+	_move_direction = facing_direction
 	_is_moving = true
 	_move_elapsed = 0.0
 	_move_from = from_screen
@@ -516,6 +540,7 @@ func _play_move(from_screen: Vector2, to_screen: Vector2, from_elevation: float,
 	_move_elev_from = from_elevation
 	_move_elev_to = to_elevation
 	z_index = _depth_for_screen_position(position, _move_elev_from)
+	_update_facing_animation()
 	return true
 
 func _process(delta: float) -> void:
@@ -524,7 +549,9 @@ func _process(delta: float) -> void:
 		return
 	_move_elapsed += delta
 	var t := clampf(_move_elapsed / move_duration, 0.0, 1.0)
-	var eased := t * t * (3.0 - 2.0 * t)
+	# Chained held-key steps run linear (constant cell speed); isolated
+	# steps keep the smoothstep ease so taps accelerate/decelerate.
+	var eased := t if _move_linear else t * t * (3.0 - 2.0 * t)
 	position = _move_from.lerp(_move_to, eased)
 	var visual_elevation := lerpf(_move_elev_from, _move_elev_to, eased)
 	z_index = _depth_for_screen_position(position, visual_elevation)
@@ -535,12 +562,13 @@ func _finish_move() -> void:
 	position = _move_to
 	_update_depth()
 	_is_moving = false
+	_update_facing_animation()
 	if not buffer_movement_input or _buffered_direction == Vector2i.ZERO:
 		_buffered_direction = Vector2i.ZERO
 		return
 	var direction := _buffered_direction
 	_buffered_direction = Vector2i.ZERO
-	_start_move(direction)
+	_start_move(direction, true)
 
 func _unhandled_key_input(event: InputEvent) -> void:
 	if network_remote:
@@ -600,6 +628,7 @@ func _ensure_sprite_frames() -> void:
 		visual.sprite_frames = SpriteFrames.new()
 	if _has_directional_textures():
 		_ensure_directional_animations(visual.sprite_frames)
+		_ensure_walk_animations(visual.sprite_frames)
 	elif visual.sprite_frames.get_frame_count(&"idle") == 0 and sprite_texture != null:
 		if not visual.sprite_frames.has_animation(&"idle"):
 			visual.sprite_frames.add_animation(&"idle")
@@ -624,6 +653,105 @@ func _ensure_directional_animations(frames: SpriteFrames) -> void:
 			frames.add_frame(animation, animations[animation])
 		frames.set_animation_speed(animation, 1.0)
 		frames.set_animation_loop(animation, true)
+
+## Walk-cycle folders under Assets/Sprites/Player/animations/walking/.
+## Grid direction → folder: (0,1) = screen down-left = south-west,
+## (1,0) = screen down-right = south-east (mirrored SW frames).
+const WALK_ANIMATION_DIRS := {
+	Vector2i(0, 1): "res://Assets/Sprites/Player/animations/walking/south-west",
+	Vector2i(1, 0): "res://Assets/Sprites/Player/animations/walking/south-east",
+}
+
+func _ensure_walk_animations(frames: SpriteFrames) -> void:
+	for direction in WALK_ANIMATION_DIRS:
+		var textures := _load_walk_frames(WALK_ANIMATION_DIRS[direction])
+		if textures.is_empty():
+			continue
+		var animation := _walk_animation_name(direction)
+		if frames.has_animation(animation):
+			frames.remove_animation(animation)
+		frames.add_animation(animation)
+		for texture in textures:
+			frames.add_frame(animation, texture)
+		frames.set_animation_loop(animation, true)
+		# One full cycle per two cell-steps reads as a natural stride.
+		frames.set_animation_speed(animation, textures.size() / maxf(move_duration * 2.0, 0.01))
+		var offset := _walk_ground_offset(direction, textures)
+		if offset != 0.0:
+			_walk_ground_offsets[animation] = offset
+
+func _load_walk_frames(dir_path: String) -> Array[Texture2D]:
+	var all: Array[Texture2D] = []
+	for i in 32:
+		var path := "%s/frame_%03d.png" % [dir_path, i]
+		if not ResourceLoader.exists(path):
+			break
+		var texture := load(path) as Texture2D
+		if texture == null:
+			break
+		all.append(texture)
+	# Experiment knob: sample evenly across the cycle so a reduced
+	# count keeps the full stride instead of truncating it.
+	if walk_frame_count <= 0 or all.size() <= walk_frame_count:
+		return all
+	var picked: Array[Texture2D] = []
+	for i in walk_frame_count:
+		picked.append(all[floori(float(i) * all.size() / float(walk_frame_count))])
+	return picked
+
+func _walk_animation_name(direction: Vector2i) -> StringName:
+	return StringName("walk_%s" % WALK_ANIMATION_DIRS[direction].get_file())
+
+func _walk_animation_for(direction: Vector2i) -> StringName:
+	if WALK_ANIMATION_DIRS.has(direction):
+		return _walk_animation_name(direction)
+	return &""
+
+## Vertical offset needed so walk frames stand on the same ground
+## line as the idle sprites. The visual anchor math assumes the idle
+## sprite proportions; walk frames are shorter and reserve the bottom
+## of the canvas for the implied cell tile, which lifts the feet.
+## Measured from pixels: align the lowest foot of the contact frames
+## with the idle sprite's foot line.
+func _walk_ground_offset(direction: Vector2i, textures: Array[Texture2D]) -> float:
+	var idle := _idle_texture_for(direction)
+	if idle == null or textures.is_empty():
+		return 0.0
+	var idle_margin := _sprite_bottom_margin(idle)
+	var walk_margin := INF
+	var walk_height := 0.0
+	for texture in textures:
+		walk_margin = minf(walk_margin, _sprite_bottom_margin(texture))
+		walk_height = maxf(walk_height, float(texture.get_height()))
+	if walk_margin == INF or idle_margin == 0.0:
+		return 0.0
+	return (idle.get_height() - walk_height) * 0.5 + (walk_margin - idle_margin)
+
+## Pixels between the sprite's bottom edge and its lowest opaque
+## pixel — the "air" under the feet.
+func _sprite_bottom_margin(texture: Texture2D) -> float:
+	var image := texture.get_image()
+	if image == null:
+		return 0.0
+	var height := image.get_height()
+	var width := image.get_width()
+	for y in range(height - 1, -1, -1):
+		for x in range(width):
+			if image.get_pixel(x, y).a > 0.05:
+				return float(height - y)
+	return 0.0
+
+func _idle_texture_for(direction: Vector2i) -> Texture2D:
+	match direction:
+		Vector2i(1, 0):
+			return sprite_down_right
+		Vector2i(-1, 0):
+			return sprite_up_left
+		Vector2i(0, 1):
+			return sprite_down_left
+		Vector2i(0, -1):
+			return sprite_up_right
+	return null
 
 func _is_cardinal_direction(direction: Vector2i) -> bool:
 	return direction == Vector2i(1, 0) or direction == Vector2i(-1, 0) or direction == Vector2i(0, 1) or direction == Vector2i(0, -1)
@@ -650,12 +778,20 @@ func _update_facing_animation() -> void:
 	if visual == null or visual.sprite_frames == null:
 		return
 	var animation := _animation_for_direction(facing_direction)
+	if _is_moving:
+		var walk := _walk_animation_for(_move_direction)
+		if visual.sprite_frames.has_animation(walk):
+			animation = walk
 	if not visual.sprite_frames.has_animation(animation):
 		animation = &"idle"
 	if not visual.sprite_frames.has_animation(animation):
 		return
-	visual.animation = animation
-	visual.play(animation)
+	# Re-playing the same animation every step would restart the cycle
+	# each cell — only switch when the target actually changed.
+	if visual.animation != animation or not visual.is_playing():
+		visual.animation = animation
+		visual.play(animation)
+	visual.position.y = _visual_base_y + _animation_y_offset(animation)
 
 func _configure_collision() -> void:
 	if collision_shape == null:
@@ -677,7 +813,11 @@ func _update_visual_metrics() -> void:
 		return
 	var base_height := _base_sprite_height()
 	visual.scale = Vector2.ONE
-	visual.position = Vector2(0.0, -base_height * 0.5 + _visual_ground_offset())
+	_visual_base_y = -base_height * 0.5 + _visual_ground_offset()
+	visual.position = Vector2(0.0, _visual_base_y + _animation_y_offset(visual.animation))
+
+func _animation_y_offset(animation: StringName) -> float:
+	return float(_walk_ground_offsets.get(animation, 0.0))
 
 func _base_sprite_height() -> float:
 	if visual == null or visual.sprite_frames == null:

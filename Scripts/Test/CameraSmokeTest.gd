@@ -8,6 +8,7 @@ var _grid: IsometricGrid
 var _original_player_position := Vector2i.ZERO
 var _original_player_elevation := 0.0
 var _failed := false
+var _overview_cam_pos := Vector2.ZERO
 
 func _initialize() -> void:
 	_main = load("res://Scenes/Main/Main.tscn").instantiate()
@@ -29,12 +30,26 @@ func _process(_delta: float) -> bool:
 		_camera.follow_target = _player
 		_camera.follow_smoothing = 1000.0
 		return false
-	if _frames < 8:
+	if _frames == 8:
+		_check_follow()
+		_check_zoom()
+		_check_coordinate_roundtrip()
+		# Zoom out to the overview level: the camera should lock to the
+		# current room's center instead of trailing the player.
+		_camera.set_zoom_level(_camera.zoom_levels.size() - 1)
 		return false
-
-	_check_follow()
-	_check_zoom()
-	_check_coordinate_roundtrip()
+	if _frames == 12:
+		_check_overview_locked()
+		_overview_cam_pos = _camera.global_position
+		_player.place_at(Vector2i(2, 2), 0.0)
+		return false
+	if _frames == 16:
+		_check_overview_holds()
+		_camera.set_zoom_level(0)
+		return false
+	if _frames < 20:
+		return false
+	_check_overview_exit_snaps()
 	_restore_player()
 
 	if _failed:
@@ -70,6 +85,31 @@ func _check_zoom() -> void:
 		push_error("CAMERA_SMOKE: zoom_out did not return to level 0: %s" % _camera.zoom)
 		_failed = true
 	_camera.set_zoom_level(0)
+
+func _check_overview_locked() -> void:
+	if _camera.zoom.x >= 1.0:
+		push_error("CAMERA_SMOKE: overview check ran at zoom %s" % _camera.zoom.x)
+		_failed = true
+		return
+	var center: Variant = _camera._overview_room_center(_player)
+	if center == null:
+		push_error("CAMERA_SMOKE: overview center is null at 0.5x (room too big or no room)")
+		_failed = true
+		return
+	if _camera.global_position.distance_to(center) > 1.0:
+		push_error("CAMERA_SMOKE: camera not locked to room center. cam=%s center=%s" % [_camera.global_position, center])
+		_failed = true
+
+func _check_overview_holds() -> void:
+	if _camera.global_position.distance_to(_overview_cam_pos) > 0.5:
+		push_error("CAMERA_SMOKE: overview camera moved inside the same room: %s -> %s" % [_overview_cam_pos, _camera.global_position])
+		_failed = true
+
+func _check_overview_exit_snaps() -> void:
+	var expected: Vector2 = _player.global_position + _camera.focus_offset
+	if _camera.global_position.distance_to(expected) > 2.0:
+		push_error("CAMERA_SMOKE: camera did not snap back to player after leaving overview. cam=%s expected=%s" % [_camera.global_position, expected])
+		_failed = true
 
 func _check_coordinate_roundtrip() -> void:
 	var cells := [Vector2i(0, 0), Vector2i(5, 5), Vector2i(11, 11), Vector2i(6, 4), Vector2i(3, 8)]
