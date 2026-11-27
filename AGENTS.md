@@ -165,10 +165,11 @@ bullets below.
     at mip levels — cosmetic, fix via premultiplied alpha if reported.
   - Never "fix" it by removing 0.5× from `zoom_levels` in
     WorldBootstrap.tscn without asking — the overview zoom is wanted.
-- Player walk animation: south-west (grid (0,1) = screen down-left)
-  and south-east (grid (1,0) = screen down-right, horizontally
-  mirrored SW frames) have cycles — 8 frames each loaded from
-  `Assets/Sprites/Player/animations/walking/<dir>/frame_*.png`
+- Player walk animation: all four directions have 8-frame cycles
+  loaded from `Assets/Sprites/Player/animations/walking/<dir>/
+  frame_*.png` — south-west (grid (0,1) = screen down-left),
+  south-east ((1,0) = down-right, mirrored SW), north-west
+  ((-1,0) = up-left), north-east ((0,-1) = up-right, mirrored NW)
   into a `walk_south_west` SpriteFrames animation (loop, one cycle
   per two cell-steps). `Player.WALK_ANIMATION_DIRS` maps grid
   direction → folder; add an entry to enable another direction (the

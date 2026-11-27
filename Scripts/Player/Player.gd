@@ -656,10 +656,14 @@ func _ensure_directional_animations(frames: SpriteFrames) -> void:
 
 ## Walk-cycle folders under Assets/Sprites/Player/animations/walking/.
 ## Grid direction → folder: (0,1) = screen down-left = south-west,
-## (1,0) = screen down-right = south-east (mirrored SW frames).
+## (1,0) = screen down-right = south-east (mirrored SW frames),
+## (-1,0) = screen up-left = north-west, (0,-1) = screen up-right =
+## north-east (mirrored NW frames).
 const WALK_ANIMATION_DIRS := {
 	Vector2i(0, 1): "res://Assets/Sprites/Player/animations/walking/south-west",
 	Vector2i(1, 0): "res://Assets/Sprites/Player/animations/walking/south-east",
+	Vector2i(-1, 0): "res://Assets/Sprites/Player/animations/walking/north-west",
+	Vector2i(0, -1): "res://Assets/Sprites/Player/animations/walking/north-east",
 }
 
 func _ensure_walk_animations(frames: SpriteFrames) -> void:
