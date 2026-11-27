@@ -182,10 +182,21 @@ func _update_room_visibility(room: Room) -> void:
 		else:
 			room.visible = false
 
+## Slide distance compensated for sub-1x camera zoom so the drop
+## covers the same SCREEN distance in the 0.5x overview — otherwise
+## the floor-change animation looks like a small hop instead of the
+## rooms dropping in. Zooms >= 1x keep the configured distance.
+func _slide_distance() -> float:
+	var viewport := get_viewport()
+	var camera := viewport.get_camera_2d() if viewport != null else null
+	var zoom := camera.zoom.x if camera != null else 1.0
+	return _room_world.room_slide_distance / maxf(minf(zoom, 1.0), 0.001)
+
 func _start_room_slide(room: Room, exiting: bool) -> void:
 	_kill_room_slide(room)
 	var home: Vector2 = _room_home.get(room, room.position)
-	var target := home + Vector2(0.0, _room_world.room_slide_distance if exiting else -_room_world.room_slide_distance)
+	var slide_dist := _slide_distance()
+	var target := home + Vector2(0.0, slide_dist if exiting else -slide_dist)
 	if not exiting:
 		room.position = target
 	room.is_sliding = true

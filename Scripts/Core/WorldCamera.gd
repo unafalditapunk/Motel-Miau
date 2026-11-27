@@ -10,6 +10,10 @@ extends Camera2D
 ## teleports jump far more, and the camera should already be on the
 ## player when they land rather than gliding across the map.
 @export var follow_snap_distance := 64.0
+## Smoothing rate for the pre-teleport recenter glide (deferred floor
+## switches at <1x zoom). Deliberately faster than follow_smoothing —
+## the glide is a transition beat, not ambient following.
+@export var recenter_smoothing := 14.0
 @export var focus_offset := Vector2.ZERO
 @export var clamp_to_center_bounds := false
 @export var center_bounds := Rect2()
@@ -29,6 +33,14 @@ var _last_follow_pos := Vector2.ZERO
 var _follow_pos_valid := false
 var _overview_zoom := false
 var _overview_was_active := false
+## Deferred action run once the camera has glided onto the follow
+## target while leaving room overview (see defer_until_recentered).
+var _recenter_action := Callable()
+## Recenter phase guard: 0 = glide onto the target, then the action
+## fires. _recenter_firing guards re-entrant defer calls from the
+## action itself.
+var _recenter_phase := 0
+var _recenter_firing := false
 
 ## Padding (world px) added around a room's cell bounds when deciding
 ## whether it fits the viewport in overview mode. Extra headroom on
@@ -52,6 +64,26 @@ func _process(delta: float) -> void:
 	var target := _get_follow_target()
 	if target == null:
 		return
+	if _recenter_action.is_valid():
+		# Recenter-then-act: overview is suspended while the camera
+		# glides onto the follow target at the current zoom; on
+		# arrival the deferred action (a floor teleport) fires, so
+		# the cut never happens from a detached room-center view.
+		var recenter_desired := _desired_position(target)
+		if _recenter_phase == 0:
+			var rk := 1.0 - exp(-recenter_smoothing * delta)
+			global_position = global_position.lerp(recenter_desired, rk)
+			_follow_pos_valid = true
+			_last_follow_pos = target.global_position
+			if global_position.distance_to(recenter_desired) <= 2.0:
+				global_position = recenter_desired
+				var action := _recenter_action
+				_recenter_action = Callable()
+				_recenter_phase = 0
+				_recenter_firing = true
+				action.call()
+				_recenter_firing = false
+			return
 	var was_overview := _overview_was_active
 	var overview: Variant = _overview_room_center(target)
 	_overview_was_active = overview != null
@@ -73,9 +105,14 @@ func _process(delta: float) -> void:
 	# the camera instead of letting it glide across the world. Leaving
 	# room overview also snaps: the locked view would otherwise glide
 	# all the way back to the player.
+	# Room-boundary moves suspend overview above; there the avatar
+	# tweens gradually, so leaving overview must glide after it
+	# instead of snapping like a teleport does.
+	var transition_follow := target is Player \
+		and (target as Player).room_transition_active
 	var teleported := not _follow_pos_valid \
 		or target.global_position.distance_to(_last_follow_pos) > follow_snap_distance \
-		or was_overview
+		or (was_overview and not transition_follow)
 	_follow_pos_valid = true
 	_last_follow_pos = target.global_position
 	if teleported or follow_smoothing <= 0.0:
@@ -101,6 +138,16 @@ func _desired_position(target: Node2D) -> Vector2:
 ## room slide animations never drag the locked camera.
 func _overview_room_center(target: Node2D) -> Variant:
 	if not _overview_zoom:
+		return null
+	# While a floor-transition slide is running, stay glued to the
+	# avatar — the room overview re-centers the moment the animation
+	# ends instead of drifting in during the slide.
+	if TransitionOverlay.any_active(get_tree()):
+		return null
+	# During a room-boundary move the avatar tweens into the next
+	# room — suspend the room-center lock so the camera follows the
+	# avatar through the slide, then re-centers when it ends.
+	if target is Player and (target as Player).room_transition_active:
 		return null
 	var room: Room = null
 	var room_world: RoomWorld = null
@@ -154,6 +201,27 @@ func notify_target_teleported() -> void:
 	_last_follow_pos = target.global_position
 	if teleported and not _overview_zoom:
 		global_position = _desired_position(target)
+
+## Defers `action` until the camera has glided from room overview onto
+## the follow target. Returns true when the action was queued (caller
+## must not proceed — it runs via the callable); false when overview
+## zoom is not active and the caller should proceed immediately.
+## A newer call replaces a pending one so the latest input wins.
+func defer_until_recentered(action: Callable) -> bool:
+	# _recenter_firing: the deferred action re-enters the transition
+	# path, which asks to defer again — it must proceed immediately
+	# or the sequence would re-queue itself forever.
+	if _recenter_firing or not _overview_zoom or is_editor_active() \
+			or not action.is_valid():
+		return false
+	# Keep the current phase: repeated defers must not restart the
+	# glide or the sequence never completes.
+	_recenter_action = action
+	return true
+
+## True while a recenter-then-act sequence is in flight.
+func is_recenter_pending() -> bool:
+	return _recenter_action.is_valid()
 
 func _get_follow_target() -> Node2D:
 	if follow_target != null and is_instance_valid(follow_target):
@@ -260,6 +328,13 @@ func is_editor_active() -> bool:
 func set_editor_mode(editor_enabled: bool) -> void:
 	if editor_enabled == _editor_active:
 		return
+	if editor_enabled and _recenter_action.is_valid():
+		# Editor mode suspends _process follow logic — run the pending
+		# action now so a deferred teleport can't soft-lock.
+		var action := _recenter_action
+		_recenter_action = Callable()
+		_recenter_phase = 0
+		action.call()
 	_editor_active = editor_enabled
 	if not editor_enabled:
 		_pan_dragging = false

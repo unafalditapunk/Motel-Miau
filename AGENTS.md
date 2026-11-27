@@ -138,24 +138,24 @@ bullets below.
   on a non-rectangular room's inside corner refusing entry while the
   rest of the shared border works; it comes and goes with room shapes.
   - Root cause (fixed once, may regress): `_connect_adjacent_pair`
-    used to `break` after the first adjacent cell found per cell. At
-    concave corners one cell borders SEVERAL cells of the other room;
-    the unrecorded pairs left border cells with no covered exit in
-    `RoomConnectionManager.find_exit` → `evaluate_transition` returns
-    "no connection" → bump. Only manifests with `shape_sections`
-    rooms interlocking (rect rooms always pair 1:1 along edges).
+	used to `break` after the first adjacent cell found per cell. At
+	concave corners one cell borders SEVERAL cells of the other room;
+	the unrecorded pairs left border cells with no covered exit in
+	`RoomConnectionManager.find_exit` → `evaluate_transition` returns
+	"no connection" → bump. Only manifests with `shape_sections`
+	rooms interlocking (rect rooms always pair 1:1 along edges).
   - Second half of the same bug: auto `auto_*` connections persist in
-    `connections.json`, and the generator used to skip existing ids —
-    reshaped rooms kept stale cell lists forever. Now
-    `auto_connect_adjacent_rooms` refreshes saved auto doors' cells in
+	`connections.json`, and the generator used to skip existing ids —
+	reshaped rooms kept stale cell lists forever. Now
+	`auto_connect_adjacent_rooms` refreshes saved auto doors' cells in
     place from current geometry and unregisters links whose rooms no
     longer share an edge.
   - If it regresses, check in order: (1) did `_connect_adjacent_pair`
     re-gain an early break or dedupe that drops pairs? (2) does
-    `find_exit`'s auto-connection `in_dest` check use
-    `has_footprint_cell` (cell-exact) rather than bounds? (3) are
-    stale `auto_*` cell lists being skipped instead of refreshed?
-    (4) is the "wall" actually a void cell inside the room's bbox —
+	`find_exit`'s auto-connection `in_dest` check use
+	`has_footprint_cell` (cell-exact) rather than bounds? (3) are
+	stale `auto_*` cell lists being skipped instead of refreshed?
+	(4) is the "wall" actually a void cell inside the room's bbox —
     shaped-room notches are NOT floor, stepping there correctly bumps.
   - Regression coverage: `RoomConnectionSmokeTest.
     _test_concave_pair_coverage` (notch room whose cells each border
@@ -327,7 +327,33 @@ bullets below.
   to the center with `follow_smoothing`, holds still while the player
   stays inside, glides to the new room's center on room change, and
   snaps back to the player when zooming out of overview. Rooms too big
-  for the viewport fall back to normal follow.
+  for the viewport fall back to normal follow. Floor teleports at
+  overview zoom don't cut from the room-center view:
+  Floor teleports at <1× zoom don't cut from the room-center view:
+  `WorldCamera.defer_until_recentered` glides the camera onto the
+  avatar at the ENTRY zoom (recenter_smoothing), then runs the
+  switch. It is invoked by
+  the three visual entry points BEFORE the transition overlay —
+  `WorldBootstrap.switch_floor`, `Player._on_floor_portal_delay_
+  elapsed` (re-entry re-validates the portal), and
+  `FloorPanel._on_enter_pressed` — never inside
+  `FloorManager.switch_floor`, which runs mid-slide and must stay
+  synchronous. Floor teleports NEVER change the player's zoom:
+  0.5× in → 0.5× out. While `TransitionOverlay.any_active()` the
+  room overview is suspended so the camera stays on the avatar for
+  the whole slide; it re-centers the room when the animation ends.
+  Zooms ≥1× never engage the defer and are never altered. Room-to-room moves at <1× also suspend the overview:
+  `Player.room_transition_active` is set while the cross-room move
+  tween plays, the camera glides after the avatar through the room
+  slide (the `was_overview` snap is suppressed so it never cuts),
+  and the overview re-centers the new room when the tween ends.
+  Room
+  transitions are NOT deferred — they keep the instant overview
+  recenter. `_recenter_firing` guards re-entrant defer calls and
+  repeated defers keep the current phase so held keys can't restart
+  the sequence; editor mode flushes a pending action immediately so
+  it can't soft-lock, and defers never engage while the camera is in
+  editor mode (creation-mode floor switches stay synchronous).
   DebugHud adds a `Mode: CREATION` line with view + cursor cell.
   Creation Mode (Phase 2): the Create Room tool (C toggles, GRID view
   only) drags LMB rectangles on the global grid — each drag adds one

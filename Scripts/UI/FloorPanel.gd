@@ -278,6 +278,13 @@ func _on_enter_pressed(floor_id: StringName) -> void:
 	if manager.active_floor != null and manager.active_floor.floor_id == floor_id:
 		return
 	_set_status("Traveling to %s..." % floor_id, false)
+	# At <1x overview zoom, glide the camera onto the avatar before
+	# the slide plays. Re-entry re-runs the guards, so a floor that
+	# became active mid-glide cancels cleanly.
+	var viewport_camera := get_viewport().get_camera_2d() as WorldCamera
+	if viewport_camera != null and viewport_camera.defer_until_recentered(
+			func() -> void: _on_enter_pressed(floor_id)):
+		return
 	# Slide transition when the overlay exists: the switch is deferred
 	# until the slide-out finishes. Close the panel as soon as the
 	# travel is accepted — the overlay's message label reports any

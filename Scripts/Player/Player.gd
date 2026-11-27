@@ -31,6 +31,11 @@ var room_world: RoomWorld
 @export var walk_frame_count := 8
 
 var _is_moving := false
+## True while the in-flight move tween crosses a room boundary
+## (spatial or interactive connection). The overview camera suspends
+## room-centering while this is set so the avatar stays in view
+## through the room slide.
+var room_transition_active := false
 var _move_elapsed := 0.0
 var _move_direction := Vector2i.ZERO
 ## True while the in-flight step is a held-key chain link: those glide
@@ -204,6 +209,7 @@ func move_to(cell: Vector2i) -> bool:
 
 func _cancel_movement() -> void:
 	_is_moving = false
+	room_transition_active = false
 	_move_elapsed = 0.0
 	_move_direction = Vector2i.ZERO
 	_buffered_direction = Vector2i.ZERO
@@ -332,7 +338,11 @@ func _start_room_transition(direction: Vector2i) -> bool:
 	world.save_room_state(previous_room)
 	var to_screen := _screen_position_for_cell(grid_position, elevation)
 	authoritative_state_changed.emit()
-	return _play_move(from_screen, to_screen, previous_elevation, elevation)
+	room_transition_active = true
+	var played := _play_move(from_screen, to_screen, previous_elevation, elevation)
+	if not _is_moving:
+		room_transition_active = false
+	return played
 
 ## Attempts an interactive (non-spatial) connection transition. entry is
 ## the Dictionary returned by RoomWorld.find_interactive_entry. Returns
@@ -368,7 +378,11 @@ func _try_connection_transition(entry: Dictionary, from_screen: Vector2, from_el
 	world.save_room_state(previous_room)
 	var to_screen := _screen_position_for_cell(grid_position, elevation)
 	authoritative_state_changed.emit()
-	return _play_move(from_screen, to_screen, previous_elevation, elevation)
+	room_transition_active = true
+	var played := _play_move(from_screen, to_screen, previous_elevation, elevation)
+	if not _is_moving:
+		room_transition_active = false
+	return played
 
 func _start_move(direction: Vector2i, chained := false) -> bool:
 	_chain_pending = chained
@@ -491,6 +505,13 @@ func _on_floor_portal_delay_elapsed(world_cell: Vector2i, stepped_room: Room) ->
 		# transition_result for the fade.
 		mm.request_portal_transition(world_cell)
 		return
+	# Single-player: at <1x overview zoom, glide the camera onto the
+	# avatar before the slide plays. Re-entry re-validates the portal
+	# and room, so a player who moved on cancels cleanly.
+	var camera := _world_camera()
+	if camera != null and camera.defer_until_recentered(
+			_on_floor_portal_delay_elapsed.bind(world_cell, stepped_room)):
+		return
 	# Single-player: run the switch under the transition slide when
 	# the overlay exists (it also locks input while it plays); fall
 	# back to a bare switch otherwise. A portal with an arrival cell
@@ -522,6 +543,12 @@ func _floor_manager() -> FloorManager:
 	if not is_inside_tree():
 		return null
 	return get_tree().get_first_node_in_group(&"floor_managers") as FloorManager
+
+## The active WorldCamera, when one is driving this viewport.
+func _world_camera() -> WorldCamera:
+	if not is_inside_tree():
+		return null
+	return get_viewport().get_camera_2d() as WorldCamera
 
 func _play_move(from_screen: Vector2, to_screen: Vector2, from_elevation: float, to_elevation: float) -> bool:
 	_move_linear = _chain_pending
@@ -562,6 +589,7 @@ func _finish_move() -> void:
 	position = _move_to
 	_update_depth()
 	_is_moving = false
+	room_transition_active = false
 	_update_facing_animation()
 	if not buffer_movement_input or _buffered_direction == Vector2i.ZERO:
 		_buffered_direction = Vector2i.ZERO

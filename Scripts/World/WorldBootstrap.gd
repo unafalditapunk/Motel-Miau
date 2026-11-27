@@ -345,15 +345,29 @@ func switch_floor(floor_id: StringName) -> bool:
 		return false
 	if floor_manager == null:
 		return false
+	# At <1x overview zoom, bring the camera onto the avatar and zoom
+	# to 1x BEFORE the overlay covers the screen — the floor teleport
+	# then plays at normal zoom instead of cutting from room center.
+	var camera := _world_camera()
+	if camera != null and camera.defer_until_recentered(
+			func() -> void: switch_floor(floor_id)):
+		return true
 	# Route through the transition overlay when present: the switch
 	# is deferred until the slide-out clears the screen; true means
 	# the transition started (the result arrives via
-	# transition_completed).
+	# transition_completed). The slide plays at the entry zoom —
+	# floor teleports never change the player's zoom.
 	var overlay := get_tree().get_first_node_in_group(&"transition_overlay") as TransitionOverlay
 	if overlay != null:
 		return bool(overlay.play_transition(
 			func() -> bool: return floor_manager.switch_floor(floor_id)))
 	return floor_manager.switch_floor(floor_id)
+
+## The active WorldCamera, when one is driving this viewport.
+func _world_camera() -> WorldCamera:
+	if not is_inside_tree():
+		return null
+	return get_viewport().get_camera_2d() as WorldCamera
 
 ## Rebinds every room-scoped reference after the active floor changed.
 ## The player node itself survives the switch (FloorManager re-places
