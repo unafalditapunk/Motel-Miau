@@ -130,7 +130,39 @@ bullets below.
   a warning, and a direction no destination satisfies refuses the
   transition. The landing cell is the one actually stepped into when it
   is a declared entry (concave corners can border several cells of the
-  same room).
+  same room). `_connect_adjacent_pair` records EVERY adjacent cell
+  pair; auto connections are refreshed in place on every
+  `auto_connect_adjacent_rooms` call (see bug entry below).
+- Invisible walls at shaped-room concave corners (recurring bug —
+  read before "fixing" boundary movement): symptom is a specific cell
+  on a non-rectangular room's inside corner refusing entry while the
+  rest of the shared border works; it comes and goes with room shapes.
+  - Root cause (fixed once, may regress): `_connect_adjacent_pair`
+    used to `break` after the first adjacent cell found per cell. At
+    concave corners one cell borders SEVERAL cells of the other room;
+    the unrecorded pairs left border cells with no covered exit in
+    `RoomConnectionManager.find_exit` → `evaluate_transition` returns
+    "no connection" → bump. Only manifests with `shape_sections`
+    rooms interlocking (rect rooms always pair 1:1 along edges).
+  - Second half of the same bug: auto `auto_*` connections persist in
+    `connections.json`, and the generator used to skip existing ids —
+    reshaped rooms kept stale cell lists forever. Now
+    `auto_connect_adjacent_rooms` refreshes saved auto doors' cells in
+    place from current geometry and unregisters links whose rooms no
+    longer share an edge.
+  - If it regresses, check in order: (1) did `_connect_adjacent_pair`
+    re-gain an early break or dedupe that drops pairs? (2) does
+    `find_exit`'s auto-connection `in_dest` check use
+    `has_footprint_cell` (cell-exact) rather than bounds? (3) are
+    stale `auto_*` cell lists being skipped instead of refreshed?
+    (4) is the "wall" actually a void cell inside the room's bbox —
+    shaped-room notches are NOT floor, stepping there correctly bumps.
+  - Regression coverage: `RoomConnectionSmokeTest.
+    _test_concave_pair_coverage` (notch room whose cells each border
+    two cells of a U-ish room — every boundary crossing must resolve).
+    For ad-hoc verification on a real save, probe every edge-adjacent
+    cross-room step with `find_room_exit` + `get_room_at_world_cell`
+    like `Player.evaluate_transition` does.
 - Tile sprites (`TileLayer`): textures ≤ `grid.tile_height` px tall are
   stretched into the 64×32 diamond as before. Taller textures render at
   native scale, anchored by `TileDefinition.sprite_anchor`: 0 (default)
@@ -213,7 +245,18 @@ bullets below.
   (Array[RoomConnection]), `metadata`. `FloorRoomSpec` holds one room:
   `room_id` (unique within the floor only), `global_origin`, `size`
   (ZERO defers to room_definition/world default), optional
-  `RoomDefinition`, `floor_colors`.
+  `RoomDefinition`, `floor_colors`, `shape_sections` (non-rectangular
+  footprint), `show_from_outside`/`show_outside`, and
+  `scatter_ground` — when true, `FloorManager._scatter_ground_tiles`
+  paints deterministic blobs of `GROUND_SCATTER_PATCH_IDS` tiles
+  (floor_iso/simple_grass_iso) over bare cells at materialization,
+  plus an independent per-cell `GROUND_SCATTER_BUSHY_CHANCE` (0.1)
+  roll for bushy_grass, seeded by room id + origin. Patched cells are
+  recorded in `room.auto_tiles`: room saves skip them and
+  `placed_content_counts` ignores them while untouched, so scattered
+  rooms stay deletable; repainting a patched cell makes it count as
+  real content again. Set automatically by the FloorEditor Create
+  Room tool; persists through layout.json like other spec fields.
 - `FloorManager` (`Scripts/World/FloorManager.gd`, Node child of
   WorldBootstrap): owns Floor definitions, auto-loads every `.tres` in
   `res://Resources/Floors/` on _ready, and materializes a floor into the

@@ -16,6 +16,20 @@ extends Node
 
 const FLOORS_DIR := "res://Resources/Floors"
 
+## Ground-cover tiles randomly scattered over bare cells when a spec
+## asks for it (FloorRoomSpec.scatter_ground — Creation Mode rooms).
+## Deterministic per room id + global origin, so every client and
+## every reload generates the identical layout; never persisted
+## (patched cells are tracked in room.auto_tiles and skipped by room
+## saves and placed-content counts).
+const GROUND_SCATTER_PATCH_IDS: Array[StringName] = [
+	&"floor_iso", &"simple_grass_iso",
+]
+## bushy_grass is NOT part of the blob pool — it rolls independently
+## on every bare cell with GROUND_SCATTER_BUSHY_CHANCE probability.
+const GROUND_SCATTER_BUSHY_ID := &"bushy_grass"
+const GROUND_SCATTER_BUSHY_CHANCE := 0.1
+
 ## Emitted after a floor has been fully materialized, its saved state
 ## loaded (when present), and the player placed — i.e. the world is
 ## ready for the new floor. The owning world uses this to rebind
@@ -1977,6 +1991,7 @@ static func spec_from_layout_entry(entry: Dictionary) -> FloorRoomSpec:
 	# Missing keys (older layout.json) default to visible.
 	spec.show_from_outside = bool(entry.get("show_from_outside", true))
 	spec.show_outside = bool(entry.get("show_outside", true))
+	spec.scatter_ground = bool(entry.get("scatter_ground", false))
 	var sections: Array[Rect2i] = []
 	for raw in entry.get("sections", []):
 		if raw is Array and (raw as Array).size() == 4:
@@ -2157,6 +2172,8 @@ func _create_room(world: RoomWorld, spec: FloorRoomSpec) -> Room:
 				defined_room.floor_colors = spec.floor_colors
 				if defined_room.floor_renderer != null:
 					defined_room.floor_renderer.queue_redraw()
+			if spec.scatter_ground:
+				_scatter_ground_tiles(world, defined_room, spec)
 		return defined_room
 	if definition != null and spec_size != Vector2i.ZERO:
 		push_warning("Floor room %s overrides definition size %s with spec size %s." % [spec.room_id, definition.size, spec_size])
@@ -2178,4 +2195,79 @@ func _create_room(world: RoomWorld, spec: FloorRoomSpec) -> Room:
 	if room != null:
 		room.show_from_outside = spec.show_from_outside
 		room.show_outside = spec.show_outside
+		if spec.scatter_ground:
+			_scatter_ground_tiles(world, room, spec)
 	return room
+
+## Scatters small organic blobs of GROUND_SCATTER_PATCH_IDS tiles over
+## the room's bare (default-tile) cells. Runs once at room
+## materialization — before saved content hydrates on top — so authored
+## or player-painted tiles always win. The RNG is seeded from the room
+## id + global origin, making the pattern identical on every peer and
+## across reloads; patched cells land in room.auto_tiles so saves skip
+## them and placed_content_counts ignores them while untouched.
+func _scatter_ground_tiles(world: RoomWorld, room: Room, spec: FloorRoomSpec) -> void:
+	var catalog := world.tile_catalog
+	if catalog == null or room == null:
+		return
+	var patch_defs: Array[TileDefinition] = []
+	for tile_id in GROUND_SCATTER_PATCH_IDS:
+		var patch_def := catalog.get_definition(tile_id)
+		if patch_def != null and patch_def != room.default_tile:
+			patch_defs.append(patch_def)
+	if patch_defs.is_empty():
+		return
+	# Eligible cells: still showing the room's default tile.
+	var remaining := {}
+	for coordinates in room.cells:
+		var cell: RoomCell = room.cells[coordinates]
+		if cell != null and cell.tile == room.default_tile:
+			remaining[coordinates] = true
+	if remaining.is_empty():
+		return
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("%s@%s" % [spec.room_id, str(spec.global_origin)])
+	var patch_budget := maxi(1, floori(float(room.cells.size()) / 2.0))
+	var patch_count := clampi(floori(float(room.cells.size()) / 8.0), 2, 20)
+	var patched := 0
+	var dirs: Array[Vector2i] = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+	while patch_count > 0 and patched < patch_budget and not remaining.is_empty():
+		patch_count -= 1
+		var tile_def: TileDefinition = patch_defs[rng.randi_range(0, patch_defs.size() - 1)]
+		var blob: Array[Vector2i] = []
+		var blob_target := mini(rng.randi_range(3, 8), patch_budget - patched)
+		var keys := remaining.keys()
+		blob.append(keys[rng.randi_range(0, keys.size() - 1)])
+		var index := 0
+		while index < blob.size() and blob.size() < blob_target and patched + blob.size() < patch_budget:
+			var origin_cell: Vector2i = blob[index]
+			index += 1
+			var options: Array[Vector2i] = []
+			for direction in dirs:
+				var neighbor: Vector2i = origin_cell + direction
+				if remaining.has(neighbor) and not blob.has(neighbor):
+					options.append(neighbor)
+			if options.is_empty():
+				continue
+			blob.append(options[rng.randi_range(0, options.size() - 1)])
+		for coordinates in blob:
+			remaining.erase(coordinates)
+			var cell: RoomCell = room.cells[coordinates]
+			cell.tile = tile_def
+			room.auto_tiles[coordinates] = tile_def.object_id
+		patched += blob.size()
+	# Independent per-cell bush roll: any still-bare cell has a
+	# GROUND_SCATTER_BUSHY_CHANCE probability of becoming bushy_grass,
+	# scattered singly rather than in blobs.
+	var bushy_def := catalog.get_definition(GROUND_SCATTER_BUSHY_ID)
+	if bushy_def != null and bushy_def != room.default_tile:
+		for coordinates in remaining.keys():
+			if rng.randf() >= GROUND_SCATTER_BUSHY_CHANCE:
+				continue
+			remaining.erase(coordinates)
+			var cell: RoomCell = room.cells[coordinates]
+			cell.tile = bushy_def
+			room.auto_tiles[coordinates] = bushy_def.object_id
+			patched += 1
+	if patched > 0:
+		room._notify_changed()

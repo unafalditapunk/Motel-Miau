@@ -326,16 +326,30 @@ func _connect_adjacent_pair(first: Room, second: Room, connection_type: RoomConn
 		for direction in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
 			var other_world: Vector2i = world + direction
 			var other_local: Vector2i = other_world - second.cell_origin
+			# No break: at concave corners one cell can border several
+			# cells of the other room, and every such pair must be a
+			# covered exit or that border cell becomes an invisible
+			# wall. Duplicate first_cells are harmless — entry_for
+			# pairs by index and auto exits land on the stepped cell.
 			if second.has_cell(other_local):
 				first_cells.append(cell)
 				second_cells.append(other_local)
-				break
-	if first_cells.is_empty():
-		return 0
-	# Idempotent: a saved/restored graph may already contain this link.
+	# Auto doors are purely geometric and regenerated on every
+	# materialization: refresh the saved/restored link's cell coverage
+	# in place so reshaped rooms never keep stale exit lists, and drop
+	# the link entirely when the pair no longer shares an edge.
 	var connection_id := StringName("auto_%s_%s" % [first.room_coordinates, second.room_coordinates])
-	if connections.get_connection(connection_id) != null:
+	var existing := connections.get_connection(connection_id)
+	if first_cells.is_empty():
+		if existing != null and connections.unregister(connection_id):
+			return 1
 		return 0
+	if existing != null:
+		if existing.source_cells == first_cells and existing.destination_cells == second_cells:
+			return 0
+		existing.source_cells = first_cells
+		existing.destination_cells = second_cells
+		return 1
 	var connection := RoomConnection.new()
 	connection.connection_id = connection_id
 	connection.connection_type = connection_type

@@ -23,6 +23,12 @@ var global_origin: Vector2i:
 		cell_origin = value
 
 var cells := {}
+## Local cell -> tile_id for ground-cover patches auto-scattered at
+## room creation (FloorRoomSpec.scatter_ground). These render as
+## normal tile overrides but are excluded from placed-content counts
+## and room saves so they never block deletion or bloat saves; a
+## cell the player repaints simply stops matching and counts again.
+var auto_tiles := {}
 var hovered_cell: Vector2i = Vector2i(-1, -1)
 var hovered_elevation := 0.0
 var block_layer: BlockLayer
@@ -59,6 +65,7 @@ func rebuild() -> void:
 
 func build_cells() -> void:
 	cells.clear()
+	auto_tiles.clear()
 	if shape_sections.is_empty():
 		for x in range(size.x):
 			for y in range(size.y):
@@ -254,7 +261,13 @@ func placed_content_counts() -> Dictionary:
 		if cell.carpet != null and cell.carpet_anchor == cell.coordinates:
 			carpets += 1
 		var tile_id := cell.tile.object_id if cell.tile != null else StringName()
-		if tile_id != default_tile_id or not is_equal_approx(cell.tile_elevation, 0.0):
+		var tile_differs := tile_id != default_tile_id or not is_equal_approx(cell.tile_elevation, 0.0)
+		# Auto-scattered ground patches still showing their assigned
+		# tile are decoration, not player-placed content.
+		if tile_differs and auto_tiles.get(cell.coordinates) == tile_id \
+				and is_equal_approx(cell.tile_elevation, 0.0):
+			tile_differs = false
+		if tile_differs:
 			tiles += 1
 	return {"blocks": blocks, "carpets": carpets, "tiles": tiles}
 

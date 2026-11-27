@@ -116,6 +116,7 @@ func _run_checks() -> void:
 	_test_exit_direction()
 	_test_connection_markers()
 	_test_shaped_room_exits()
+	_test_concave_pair_coverage()
 
 func _test_registration() -> void:
 	var good := _make_connection(&"door_a_b", Vector2i(0, 0), Vector2i(1, 0), [Vector2i(15, 7), Vector2i(15, 8)], [Vector2i(0, 7), Vector2i(0, 8)])
@@ -346,8 +347,8 @@ func _test_shaped_room_exits() -> void:
 
 	# Corner cell (3,3) borders B on two sides: south enters B at
 	# world (103,104) = B local (1,1); east enters at (104,103) = (2,0).
-	# The recorded pair only keeps the first adjacency, so the stepped
-	# cell must win over the index-paired entry.
+	# Both adjacencies are recorded now, but the stepped cell must
+	# still win over the index-paired entry.
 	var south := _room_world.find_room_exit(room_l, Vector2i(3, 3), Vector2i(0, 1))
 	_expect(not south.is_empty() and south["room_id"] == Vector2i(11, 10),
 		"corner south exit missing: %s" % str(south))
@@ -376,6 +377,41 @@ func _test_shaped_room_exits() -> void:
 	_expect(_player.room != null and _player.room.room_coordinates == Vector2i(11, 10),
 		"edge step into B failed, room is %s" % (_player.room.room_coordinates if _player.room != null else "<none>"))
 	_expect(_player.grid_position == Vector2i(0, 4), "edge step landed on %s, expected (0,4)" % _player.grid_position)
+
+func _test_concave_pair_coverage() -> void:
+	# Regression: a cell of the FIRST room can border TWO cells of the
+	# second at a concave corner. The old pairing kept only the first
+	# adjacency, leaving the second-room cell whose sole neighbor was
+	# consumed without any covered exit — an invisible wall. Here the
+	# notch room's every cell borders both bars of the U-ish room, so
+	# all six boundary crossings must resolve.
+	var room_a := _room_world.create_room_at(Vector2i(12, 10), Vector2i(57, 12), Vector2i(1, 3))
+	var room_b := _room_world.create_room_at(Vector2i(13, 10), Vector2i(56, 12), Vector2i(3, 3), [],
+		[Rect2i(0, 0, 1, 3), Rect2i(2, 0, 1, 3)])
+	_expect(room_a != null and room_b != null, "concave coverage rooms failed to create")
+	if room_a == null or room_b == null:
+		return
+	_expect(_room_world._connect_adjacent_pair(room_a, room_b, RoomConnection.ConnectionType.DOOR) == 1,
+		"auto-connect did not link the interlocking rooms")
+	# B's left-bar cells were the uncovered side under the old logic:
+	# each borders only the notch cell that paired with the right bar.
+	for y in range(3):
+		var exit := _room_world.find_room_exit(room_b, Vector2i(0, y), Vector2i(1, 0))
+		_expect(not exit.is_empty() and exit["room_id"] == Vector2i(12, 10),
+			"left-bar exit (0,%d) missing: %s" % [y, str(exit)])
+		if not exit.is_empty():
+			_expect(exit["cell"] == Vector2i(0, y),
+				"left-bar exit (0,%d) landed on %s" % [y, str(exit["cell"])])
+		var right_exit := _room_world.find_room_exit(room_b, Vector2i(2, y), Vector2i(-1, 0))
+		_expect(not right_exit.is_empty(), "right-bar exit (2,%d) missing" % y)
+	# And the notch room can still enter both bars.
+	for y in range(3):
+		var west := _room_world.find_room_exit(room_a, Vector2i(0, y), Vector2i(-1, 0))
+		_expect(not west.is_empty() and west["cell"] == Vector2i(0, y),
+			"notch west exit (0,%d) landed on %s" % [y, str(west.get("cell"))])
+		var east := _room_world.find_room_exit(room_a, Vector2i(0, y), Vector2i(1, 0))
+		_expect(not east.is_empty() and east["cell"] == Vector2i(2, y),
+			"notch east exit (0,%d) landed on %s" % [y, str(east.get("cell"))])
 
 func _report() -> void:
 	if _failures.is_empty():

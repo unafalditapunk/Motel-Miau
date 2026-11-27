@@ -1371,6 +1371,7 @@ func _on_panel_create() -> void:
 	spec.size = bounds.size
 	spec.show_from_outside = _panel_show_from_outside.button_pressed
 	spec.show_outside = _panel_show_outside.button_pressed
+	spec.scatter_ground = true
 	if _structural_readonly():
 		# Clients send the spec; the server validates and broadcasts.
 		# Sections/panel stay open until the result arrives — no local

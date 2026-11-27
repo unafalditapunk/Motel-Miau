@@ -197,6 +197,7 @@ static func spec_to_layout_entry(spec: FloorRoomSpec) -> Dictionary:
 		"floor_colors": [],
 		"show_from_outside": spec.show_from_outside,
 		"show_outside": spec.show_outside,
+		"scatter_ground": spec.scatter_ground,
 	}
 	for color in spec.floor_colors:
 		entry["floor_colors"].append(color.to_html())

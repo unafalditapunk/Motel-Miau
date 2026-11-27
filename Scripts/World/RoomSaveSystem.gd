@@ -327,6 +327,11 @@ static func _collect_tiles(room: Room) -> Array:
 		var tile_id := cell.tile.object_id if cell.tile != null else StringName()
 		if tile_id == default_tile_id and is_equal_approx(cell.tile_elevation, 0.0):
 			continue
+		# Auto-scattered ground patches that still show their assigned
+		# tile regenerate deterministically on load — never persist them.
+		if room.auto_tiles.get(coordinates) == tile_id \
+				and is_equal_approx(cell.tile_elevation, 0.0):
+			continue
 		tiles.append({
 			"position": [coordinates.x, coordinates.y],
 			"id": String(tile_id),

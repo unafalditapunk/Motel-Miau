@@ -25,6 +25,12 @@ extends Resource
 ## rectangle described by global_origin + size. When present,
 ## global_origin/size are normalized to the union's bounding box.
 @export var shape_sections: Array[Rect2i] = []
+## When true, the room's bare cells get deterministic ground-cover
+## patches (FloorManager.GROUND_SCATTER_PATCH_IDS) scattered over the
+## default tile at materialization — same seed every load, never
+## written to room saves, and excluded from placed-content counts so
+## the room stays deletable. Set by the FloorEditor Create Room tool.
+@export var scatter_ground := false
 
 ## Global cell rects that make up this spec's footprint: the stored
 ## sections, or the single global_origin+size rectangle.
