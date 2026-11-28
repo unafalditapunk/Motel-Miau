@@ -49,7 +49,8 @@ $Tests = @(
     "PortalSmokeTest",
     "PortalTransitionSmokeTest",
     "PortalLifecycleSmokeTest",
-    "TransitionOverlaySmokeTest"
+    "TransitionOverlaySmokeTest",
+    "AvatarPanelSmokeTest"
 )
 
 if ($Filter -ne "") {

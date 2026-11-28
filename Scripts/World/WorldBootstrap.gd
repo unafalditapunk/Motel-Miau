@@ -8,6 +8,7 @@ extends Node2D
 
 const DEBUG_HUD_SCRIPT := preload("res://Scripts/Debug/DebugHud.gd")
 const FLOOR_PANEL_SCRIPT := preload("res://Scripts/UI/FloorPanel.gd")
+const AVATAR_PANEL_SCRIPT := preload("res://Scripts/UI/AvatarPanel.gd")
 const TRANSITION_OVERLAY_SCRIPT := preload("res://Scripts/UI/TransitionOverlay.gd")
 const SAVE_KEY := KEY_F5
 const LOAD_KEY := KEY_F6
@@ -44,6 +45,7 @@ var tile_layer: TileLayer
 var carpet_layer: CarpetLayer
 var _debug_hud: DebugHud
 var _floor_panel: FloorPanel
+var _avatar_panel: AvatarPanel
 var _floor_editor: FloorEditor
 var _net_manager: MultiplayerManager
 ## Launch args parsed once in _ready; empty dict = single-player.
@@ -99,6 +101,7 @@ func _ready() -> void:
 		return
 	_configure_room_layers()
 	_spawn_player()
+	_apply_saved_avatar()
 	# load_floor ran before the player existed, so spawn placement was
 	# skipped; place the player at a random spawn point now that the
 	# node exists. Saved player_state no longer resumes a position —
@@ -113,6 +116,7 @@ func _ready() -> void:
 			_configure_room_layers()
 	_build_debug_hud()
 	_build_floor_panel()
+	_build_avatar_panel()
 	_build_floor_editor()
 	_build_transition_overlay()
 	_wire_placement_controller()
@@ -217,6 +221,26 @@ func _build_floor_panel() -> void:
 	_floor_panel = FLOOR_PANEL_SCRIPT.new()
 	_floor_panel.name = "FloorPanel"
 	add_child(_floor_panel)
+
+func _build_avatar_panel() -> void:
+	_avatar_panel = AVATAR_PANEL_SCRIPT.new()
+	_avatar_panel.name = "AvatarPanel"
+	add_child(_avatar_panel)
+
+## Equips the persisted avatar selection
+## (user://avatar_selection.json) on the local player. Missing or
+## no-longer-valid ids keep the scene default — the catalog only
+## lists folders that still exist on disk.
+func _apply_saved_avatar() -> void:
+	if player == null:
+		return
+	var saved := AvatarCatalog.load_selection()
+	if saved.is_empty():
+		return
+	var entry: Variant = AvatarCatalog.find(saved)
+	if not (entry is Dictionary) or not bool(entry.get("ready", false)):
+		return
+	player.set_character(String(entry["root"]))
 
 ## Screen-space transition fade: pure presentation, driven by
 ## play_transition (single-player) and the net manager's local

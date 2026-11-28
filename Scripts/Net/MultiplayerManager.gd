@@ -82,6 +82,13 @@ var _my_floor_id := &""
 ## ones, so a queued spawn can never duplicate an avatar. Retried each
 ## frame; cleared on despawn, floor change, and disconnect.
 var _pending_avatar_spawns := {}
+## peer_id -> chosen avatar id (AvatarCatalog "race/variant"). Server:
+## authoritative per-player cosmetic state set via _rpc_avatar_request
+## and read when spawning/broadcasting bodies. Client: last id seen in
+## welcome/spawn/avatar-state traffic, used to skin deferred spawns.
+## Survives floor travels and avatar despawns — only peer join/leave
+## and server disconnect clear it.
+var _avatar_ids := {}
 ## Client: a transition request is in flight — input and build requests
 ## stay locked until the destination snapshot applies or a rejection
 ## arrives.
@@ -518,14 +525,16 @@ func _complete_peer_join(peer_id: int) -> void:
 			continue
 		states.append([other_id, _floor_id_for_peer(other_id),
 			other.room.room_coordinates,
-			other.grid_position, other.elevation, other.facing_direction])
+			other.grid_position, other.elevation, other.facing_direction,
+			_avatar_ids.get(other_id, &"")])
 	_rpc_welcome.rpc_id(peer_id, body.room.room_coordinates,
 		body.grid_position, body.elevation, body.facing_direction, states)
 	# Everyone else learns about the new player (the joiner ignores
 	# its own id in _rpc_spawn_player).
 	_rpc_spawn_player.rpc(peer_id, _primary_floor_id(),
 		body.room.room_coordinates,
-		body.grid_position, body.elevation, body.facing_direction)
+		body.grid_position, body.elevation, body.facing_direction,
+		_avatar_ids.get(peer_id, &""))
 	print("MultiplayerManager: peer %d joined (%d player(s) total)." % [peer_id, _bodies.size()])
 
 func _on_peer_disconnected(peer_id: int) -> void:
@@ -535,6 +544,7 @@ func _on_peer_disconnected(peer_id: int) -> void:
 	_build_op_max.erase(peer_id)
 	_peer_floor.erase(peer_id)
 	_transition_inflight.erase(peer_id)
+	_avatar_ids.erase(peer_id)
 	var body: Player = _bodies.get(peer_id)
 	if body != null:
 		body.queue_free()
@@ -553,6 +563,14 @@ func _spawn_body(peer_id: int) -> Player:
 		return null
 	body.network_remote = true
 	body.name = "NetBody_%d" % peer_id
+	# Cosmetic avatar choice announced by the client (or &"" for the
+	# scene default). Set before add_child so _ready builds the right
+	# sprite frames directly.
+	var avatar_id: StringName = _avatar_ids.get(peer_id, &"")
+	if not avatar_id.is_empty():
+		var avatar_root := AvatarCatalog.root_for(avatar_id)
+		if not avatar_root.is_empty():
+			body.set_character(avatar_root)
 	body.grid = _world.room_world.grid
 	body.room_world = _world.room_world
 	# Spawn at a random spawn point of the primary floor — the same
@@ -600,6 +618,10 @@ func _on_connected_to_server() -> void:
 	_connected = true
 	my_peer_id = multiplayer.get_unique_id()
 	print("MultiplayerManager: connected to server as peer %d." % my_peer_id)
+	# Announce the local avatar choice immediately — the server stores
+	# it per-peer even before this client's body exists, so the first
+	# spawn broadcast already carries the right skin.
+	_announce_avatar()
 
 func _on_connection_failed() -> void:
 	push_error("MultiplayerManager: connection to %s:%d failed." % [server_address, server_port])
@@ -622,6 +644,7 @@ func _on_server_disconnected() -> void:
 			avatar.queue_free()
 	_avatars.clear()
 	_pending_avatar_spawns.clear()
+	_avatar_ids.clear()
 
 func _local_player() -> Player:
 	return _world.player if _world != null else null
@@ -706,7 +729,8 @@ func _reconcile_local(room_id: Vector2i, cell: Vector2i, cell_elevation: float) 
 	player.place_at(cell, cell_elevation)
 
 func _spawn_avatar(peer_id: int, floor_id: StringName, room_id: Vector2i,
-		cell: Vector2i, cell_elevation: float, face: Vector2i) -> void:
+		cell: Vector2i, cell_elevation: float, face: Vector2i,
+		avatar_id := &"") -> void:
 	if _avatars.has(peer_id):
 		return
 	# Only players sharing this client's floor get an avatar — room
@@ -721,6 +745,16 @@ func _spawn_avatar(peer_id: int, floor_id: StringName, room_id: Vector2i,
 		return
 	avatar.network_remote = true
 	avatar.name = "NetAvatar_%d" % peer_id
+	# Skin the replica before add_child so _ready builds the right
+	# frames directly; the id may come from the spawn payload or the
+	# cache filled by earlier avatar-state broadcasts.
+	var resolved_id: StringName = avatar_id if not avatar_id.is_empty() \
+		else _avatar_ids.get(peer_id, &"")
+	if not resolved_id.is_empty():
+		var avatar_root := AvatarCatalog.root_for(resolved_id)
+		if not avatar_root.is_empty():
+			avatar.set_character(avatar_root)
+		_avatar_ids[peer_id] = resolved_id
 	avatar.grid = _world.room_world.grid
 	avatar.room_world = _world.room_world
 	avatar.block_layer = room.block_layer
@@ -744,16 +778,23 @@ func _spawn_avatar(peer_id: int, floor_id: StringName, room_id: Vector2i,
 ## just left.
 func _request_avatar_spawn(peer_id: int, floor_id: StringName,
 		room_id: Vector2i, cell: Vector2i, cell_elevation: float,
-		face: Vector2i) -> void:
+		face: Vector2i, avatar_id := &"") -> void:
 	if _avatars.has(peer_id):
 		_pending_avatar_spawns.erase(peer_id)
 		return
 	if _my_floor_id != &"" and floor_id != _my_floor_id:
 		_pending_avatar_spawns.erase(peer_id)
 		return
+	# Carry the latest known avatar id through the deferred queue so a
+	# spawn retried after the world materializes still skins correctly.
+	var resolved_id: StringName = avatar_id if not avatar_id.is_empty() \
+		else _avatar_ids.get(peer_id, &"")
+	if not resolved_id.is_empty():
+		_avatar_ids[peer_id] = resolved_id
 	_pending_avatar_spawns[peer_id] = {
 		"floor_id": floor_id, "room_id": room_id, "cell": cell,
-		"elevation": cell_elevation, "face": face}
+		"elevation": cell_elevation, "face": face,
+		"avatar_id": resolved_id}
 	_try_avatar_spawn(peer_id)
 
 ## Retries one queued spawn. Drops the entry when the avatar already
@@ -775,7 +816,8 @@ func _try_avatar_spawn(peer_id: int) -> void:
 		_pending_avatar_spawns[peer_id]["room_id"],
 		_pending_avatar_spawns[peer_id]["cell"],
 		float(pending.get("elevation", 0.0)),
-		pending.get("face", Vector2i.ZERO))
+		pending.get("face", Vector2i.ZERO),
+		StringName(str(pending.get("avatar_id", ""))))
 	if _avatars.has(peer_id):
 		_pending_avatar_spawns.erase(peer_id)
 
@@ -1308,7 +1350,8 @@ func _handle_floor_transition(peer_id: int, floor_id: StringName,
 			continue
 		_rpc_spawn_player.rpc_id(peer_id, other_id, floor_id,
 			other.room.room_coordinates, other.grid_position,
-			other.elevation, other.facing_direction)
+			other.elevation, other.facing_direction,
+			_avatar_ids.get(other_id, &""))
 	print("MultiplayerManager: peer %d transitioned %s -> %s." % [
 		peer_id, current_id, floor_id])
 
@@ -2333,19 +2376,22 @@ func _rpc_welcome(room_id: Vector2i, cell: Vector2i, cell_elevation: float,
 		return
 	_reconcile_local(room_id, cell, cell_elevation)
 	for entry in states:
-		# entries: [peer_id, floor_id, room_id, cell, elev, face]
+		# entries: [peer_id, floor_id, room_id, cell, elev, face, avatar_id?]
 		if entry is Array and entry.size() >= 6:
+			var avatar_id := StringName(str(entry[6])) \
+				if entry.size() > 6 else &""
 			_request_avatar_spawn(int(entry[0]), StringName(str(entry[1])), entry[2],
-				entry[3], entry[4], entry[5])
+				entry[3], entry[4], entry[5], avatar_id)
 
 ## Server -> all clients: a player entered the world (or a floor the
 ## recipient just transitioned to — sent rpc_id in that case).
 @rpc("authority", "call_remote", "reliable")
 func _rpc_spawn_player(peer_id: int, floor_id: StringName, room_id: Vector2i,
-		cell: Vector2i, cell_elevation: float, face: Vector2i) -> void:
+		cell: Vector2i, cell_elevation: float, face: Vector2i,
+		avatar_id := &"") -> void:
 	if multiplayer.is_server() or peer_id == my_peer_id:
 		return
-	_request_avatar_spawn(peer_id, floor_id, room_id, cell, cell_elevation, face)
+	_request_avatar_spawn(peer_id, floor_id, room_id, cell, cell_elevation, face, avatar_id)
 
 ## Server -> all clients: authoritative grid state for a peer.
 @rpc("authority", "call_remote", "reliable")
@@ -2374,8 +2420,63 @@ func _rpc_despawn_player(peer_id: int) -> void:
 	_remove_avatar(peer_id)
 
 # ------------------------------------------------------------------
+# Avatar choice RPCs (cosmetic, per-peer)
+# ------------------------------------------------------------------
+
+## Client -> server: avatar/cosmetic choice. Validated against the
+## catalog; stored per-peer, applied to the authoritative body, and
+## rebroadcast so every client re-skins the replica.
+@rpc("any_peer", "call_remote", "reliable")
+func _rpc_avatar_request(avatar_id: StringName) -> void:
+	if mode != Mode.SERVER:
+		return
+	var entry: Variant = AvatarCatalog.find(avatar_id)
+	if not (entry is Dictionary) or not bool(entry.get("ready", false)):
+		return
+	var sender := multiplayer.get_remote_sender_id()
+	_avatar_ids[sender] = avatar_id
+	var body: Player = _bodies.get(sender)
+	if body != null:
+		body.set_character(String(entry["root"]))
+	_rpc_avatar_state.rpc(sender, avatar_id)
+
+## Server -> all clients: a peer's avatar choice (new choice or the
+## id carried by a spawn). Replicas re-skin; peers without a spawned
+## avatar just keep the cached id for their next spawn.
+@rpc("authority", "call_remote", "reliable")
+func _rpc_avatar_state(peer_id: int, avatar_id: StringName) -> void:
+	if multiplayer.is_server():
+		return
+	_avatar_ids[peer_id] = avatar_id
+	var avatar: Player = _avatars.get(peer_id)
+	if avatar == null:
+		return
+	var root := AvatarCatalog.root_for(avatar_id)
+	if not root.is_empty():
+		avatar.set_character(root)
+
+# ------------------------------------------------------------------
 # Client input hook: forward local movement to the server.
 # ------------------------------------------------------------------
+
+## Client -> server: cosmetic avatar choice ("race/variant"). The
+## server validates it against AvatarCatalog, stores it per-peer,
+## applies it to the authoritative body, and rebroadcasts so every
+## client re-skins the replica. The caller applies it locally first.
+func request_avatar_change(avatar_id: StringName) -> void:
+	if mode != Mode.CLIENT or not _connected:
+		return
+	_rpc_avatar_request.rpc_id(1, avatar_id)
+
+## Announces the local player's current character_root as an avatar
+## id. No-op when the root is not a catalog entry.
+func _announce_avatar() -> void:
+	var player := _local_player()
+	if player == null:
+		return
+	var avatar_id := AvatarCatalog.id_for_root(player.character_root)
+	if not avatar_id.is_empty():
+		request_avatar_change(avatar_id)
 
 ## Called by the local player when it accepts a move direction.
 func request_move(direction: Vector2i) -> void:

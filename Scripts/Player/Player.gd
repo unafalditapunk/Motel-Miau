@@ -16,6 +16,12 @@ var room_world: RoomWorld
 @export var height_units := 2.0
 @export var max_step_height := 1.0
 @export var sprite_texture: Texture2D
+## Root of the active character set. Idle sprites come from the
+## sprite_* exports (typically <root>/rotations/<dir>.png); walk cycles
+## load from <root>/animations/Walking/<dir>/frame_*.png where <dir>
+## is one of south-west/south-east/north-west/north-east. Swap this to
+## try another character (e.g. Assets/Characters/cat/siamese).
+@export var character_root := "res://Assets/Characters/cat/orange"
 @export var sprite_down_right: Texture2D
 @export var sprite_up_left: Texture2D
 @export var sprite_down_left: Texture2D
@@ -220,7 +226,8 @@ func _cancel_movement() -> void:
 ## with floor editing, or act on an unsynchronized world.
 func _world_ui_blocked() -> bool:
 	return local_input_locked \
-		or FloorPanel.any_open(get_tree()) or FloorEditor.any_active(get_tree())
+		or FloorPanel.any_open(get_tree()) or FloorEditor.any_active(get_tree()) \
+		or AvatarPanel.any_open(get_tree())
 
 func request_move(direction: Vector2i) -> void:
 	if direction == Vector2i.ZERO or _world_ui_blocked():
@@ -566,7 +573,7 @@ func _play_move(from_screen: Vector2, to_screen: Vector2, from_elevation: float,
 	_move_to = to_screen
 	_move_elev_from = from_elevation
 	_move_elev_to = to_elevation
-	z_index = _depth_for_screen_position(position, _move_elev_from)
+	z_index = _depth_for_screen_position(_depth_sample_position(position), _move_elev_from)
 	_update_facing_animation()
 	return true
 
@@ -581,7 +588,7 @@ func _process(delta: float) -> void:
 	var eased := t if _move_linear else t * t * (3.0 - 2.0 * t)
 	position = _move_from.lerp(_move_to, eased)
 	var visual_elevation := lerpf(_move_elev_from, _move_elev_to, eased)
-	z_index = _depth_for_screen_position(position, visual_elevation)
+	z_index = _depth_for_screen_position(_depth_sample_position(position), visual_elevation)
 	if t >= 1.0:
 		_finish_move()
 
@@ -649,6 +656,42 @@ func _direction_from_key(keycode: Key) -> Vector2i:
 			return Vector2i(-1, 0)
 	return Vector2i.ZERO
 
+## Swaps the visible character set at runtime. new_root is a catalog
+## character root ("res://Assets/Characters/<race>/<variant>"); all
+## four rotation sprites must exist or the swap is refused. Walk
+## cycles rebuild from <root>/animations/Walking/ — east directions
+## fall back to horizontally mirrored west frames when their folders
+## are absent, so a variant only needs south-west/north-west art.
+func set_character(new_root: String) -> bool:
+	if new_root.is_empty() or new_root == character_root:
+		return new_root == character_root
+	var rotations := _load_rotations(new_root)
+	if rotations.size() != AvatarCatalog.ROTATION_FILES.size():
+		push_warning("Player.set_character: '%s' is missing rotation sprites; swap refused." % new_root)
+		return false
+	character_root = new_root
+	for dir_name in rotations:
+		set(AvatarCatalog.ROTATION_FILES[dir_name], rotations[dir_name])
+	if not is_node_ready():
+		return true
+	if visual != null:
+		visual.sprite_frames = SpriteFrames.new()
+	_ensure_sprite_frames()
+	_update_visual_metrics()
+	return true
+
+func _load_rotations(root_path: String) -> Dictionary:
+	var rotations := {}
+	for dir_name in AvatarCatalog.ROTATION_FILES:
+		var path := "%s/rotations/%s.png" % [root_path, dir_name]
+		# exists() guard: load() logs an engine error per missing file.
+		if not ResourceLoader.exists(path):
+			continue
+		var texture := load(path) as Texture2D
+		if texture != null:
+			rotations[dir_name] = texture
+	return rotations
+
 func _ensure_sprite_frames() -> void:
 	if visual == null:
 		return
@@ -682,21 +725,59 @@ func _ensure_directional_animations(frames: SpriteFrames) -> void:
 		frames.set_animation_speed(animation, 1.0)
 		frames.set_animation_loop(animation, true)
 
-## Walk-cycle folders under Assets/Sprites/Player/animations/walking/.
-## Grid direction → folder: (0,1) = screen down-left = south-west,
-## (1,0) = screen down-right = south-east (mirrored SW frames),
-## (-1,0) = screen up-left = north-west, (0,-1) = screen up-right =
-## north-east (mirrored NW frames).
+## Grid direction → walk-cycle folder name under
+## <character_root>/animations/Walking/: (0,1) = screen down-left =
+## south-west, (1,0) = screen down-right = south-east, (-1,0) = screen
+## up-left = north-west, (0,-1) = screen up-right = north-east. The
+## east folders hold horizontally mirrored west frames.
 const WALK_ANIMATION_DIRS := {
-	Vector2i(0, 1): "res://Assets/Sprites/Player/animations/walking/south-west",
-	Vector2i(1, 0): "res://Assets/Sprites/Player/animations/walking/south-east",
-	Vector2i(-1, 0): "res://Assets/Sprites/Player/animations/walking/north-west",
-	Vector2i(0, -1): "res://Assets/Sprites/Player/animations/walking/north-east",
+	Vector2i(0, 1): "south-west",
+	Vector2i(1, 0): "south-east",
+	Vector2i(-1, 0): "north-west",
+	Vector2i(0, -1): "north-east",
 }
 
+func _walk_dir_path(direction: Vector2i) -> String:
+	return "%s/animations/Walking/%s" % [character_root, WALK_ANIMATION_DIRS[direction]]
+
+## East walk folders hold horizontally mirrored west frames when the
+## artist only ships west art; variants may also omit them entirely,
+## in which case the west cycle is flipped at load time. Real east
+## files always win when present.
+const MIRRORED_WALK_DIRS := {
+	"south-east": "south-west",
+	"north-east": "north-west",
+}
+
+func _walk_frames_for(direction: Vector2i) -> Array[Texture2D]:
+	var dir_name: String = WALK_ANIMATION_DIRS[direction]
+	var textures := _load_walk_frames(_walk_dir_path(direction))
+	if not textures.is_empty():
+		return textures
+	var mirror := String(MIRRORED_WALK_DIRS.get(dir_name, ""))
+	if mirror.is_empty():
+		return []
+	var source := _load_walk_frames("%s/animations/Walking/%s" % [character_root, mirror])
+	var flipped: Array[Texture2D] = []
+	for texture in source:
+		flipped.append(_flip_texture_horizontal(texture))
+	return flipped
+
+## Runtime horizontal mirror for west-only walk art. Mipmaps are
+## regenerated so 0.5x overview filtering still applies; real east
+## PNGs on disk are preferred whenever they exist.
+func _flip_texture_horizontal(texture: Texture2D) -> Texture2D:
+	var image := texture.get_image()
+	if image == null:
+		return texture
+	image.flip_x()
+	image.generate_mipmaps()
+	return ImageTexture.create_from_image(image)
+
 func _ensure_walk_animations(frames: SpriteFrames) -> void:
+	_walk_ground_offsets.clear()
 	for direction in WALK_ANIMATION_DIRS:
-		var textures := _load_walk_frames(WALK_ANIMATION_DIRS[direction])
+		var textures := _walk_frames_for(direction)
 		if textures.is_empty():
 			continue
 		var animation := _walk_animation_name(direction)
@@ -878,6 +959,15 @@ func _update_visual_position() -> void:
 		return
 	position = _screen_position_for_cell(grid_position, elevation)
 	_update_depth()
+
+## Depth is sampled at the feet (bottom of the cell diamond), not the
+## cell anchor: while walking south the sprite's feet overlap the next
+## cell's tall tiles before the anchor crosses the boundary, and those
+## tiles' surface depth would cover them. The -2px keeps the sample
+## inside the diamond — the exact bottom vertex ties to the diagonal
+## front cell in screen_to_grid.
+func _depth_sample_position(screen_position: Vector2) -> Vector2:
+	return screen_position + Vector2(0.0, _tile_size().y * 0.5 - 2.0)
 
 func _depth_for_screen_position(screen_position: Vector2, cell_elevation: float) -> int:
 	if grid == null:

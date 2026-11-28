@@ -31,7 +31,8 @@ WorldSnapshotSmokeTest, BuildOpsSmokeTest,
 StructuralGuardSmokeTest, FloorTransitionSmokeTest,
 StructuralOpsSmokeTest, FloorOpsSmokeTest, ServerPersistenceSmokeTest,
 SpawnPointSmokeTest, PortalSmokeTest, PortalTransitionSmokeTest,
-PortalLifecycleSmokeTest, TransitionOverlaySmokeTest.
+PortalLifecycleSmokeTest, TransitionOverlaySmokeTest,
+AvatarPanelSmokeTest.
 Each prints `<NAME>_SMOKE: OK`. Tests that touch the filesystem redirect
 `RoomSaveSystem.save_dir`/`FloorSaveSystem.save_root` to a
 `user://smoke_*` scratch dir so they never write to the real saves.
@@ -215,15 +216,45 @@ bullets below.
     already correct, only the reimport + restart was missing.
   - Never "fix" it by removing 0.5× from `zoom_levels` in
     WorldBootstrap.tscn without asking — the overview zoom is wanted.
+- Avatar system: playable characters live under
+  `Assets/Characters/<race>/<variant>/` and are auto-discovered by
+  `AvatarCatalog` (`Scripts/World/AvatarCatalog.gd`, static) — adding
+  a race/variant is pure content, no code or catalog edits. Variant
+  layout: `rotations/{north-east,north-west,south-east,south-west}.png`
+  (4 idle sprites, required for the variant to be "ready") plus
+  optional `animations/Walking/<dir>/frame_*.png` walk cycles. A
+  variant missing any rotation shows in the menu disabled; races with
+  no art yet still list so upcoming content is visible. East walk
+  dirs may be omitted — `Player._walk_frames_for` mirrors the west
+  cycle horizontally at load time (real east PNGs always win).
+  `Player.set_character(root)` swaps the whole set at runtime: it
+  reloads the four rotation textures into the `sprite_*` exports,
+  rebuilds SpriteFrames, and re-measures walk ground offsets.
+  `AvatarPanel` (`Scripts/UI/AvatarPanel.gd`, P key) is the picker:
+  Normal Mode only (blocked during Build/Creation Mode, FloorPanel,
+  transitions), race list left + variant list right with previews,
+  equip persists to `user://avatar_selection.json`
+  (`AvatarCatalog.selection_path`, tests redirect it) and applies on
+  next boot via `WorldBootstrap._apply_saved_avatar`. Selection is
+  per-player cosmetic state: clients announce it via
+  `MultiplayerManager.request_avatar_change` → `_rpc_avatar_request`
+  (server validates against the catalog, stores `_avatar_ids`,
+  re-skins the authoritative body, rebroadcasts `_rpc_avatar_state`);
+  the id also rides spawn/welcome/travel payloads so deferred and
+  floor-changing spawns stay skinned. `AvatarPanel.any_open()` joins
+  the modal-input guards in Player/BlockPlacementController.
+  `AvatarPanelSmokeTest` covers discovery, equip, mirroring, and
+  input blocking.
 - Player walk animation: all four directions have 8-frame cycles
-  loaded from `Assets/Sprites/Player/animations/walking/<dir>/
+  loaded from `<character_root>/animations/Walking/<dir>/
   frame_*.png` — south-west (grid (0,1) = screen down-left),
   south-east ((1,0) = down-right, mirrored SW), north-west
   ((-1,0) = up-left), north-east ((0,-1) = up-right, mirrored NW)
-  into a `walk_south_west` SpriteFrames animation (loop, one cycle
-  per two cell-steps). `Player.WALK_ANIMATION_DIRS` maps grid
-  direction → folder; add an entry to enable another direction (the
-  `north-west` folder already has frames). Walk frames reserve the
+  into `walk_south-west`-style SpriteFrames animations (loop, one
+  cycle per two cell-steps; names keep the folder's hyphenated
+  spelling). `Player.WALK_ANIMATION_DIRS` maps grid
+  direction → folder; `Player.MIRRORED_WALK_DIRS` names the west
+  source for east fallbacks. Walk frames reserve the
   bottom of the canvas for the implied cell tile, so
   `_walk_ground_offset` measures the foot line from pixels at startup
   and `_animation_y_offset` shifts the visual down while a walk anim
