@@ -510,7 +510,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		# F enters Creation Mode only from Build Mode; Q is the catalog
 		# toggle there and Play Mode has no creation shortcut.
 		if key_event.pressed and not key_event.echo \
-				and key_event.physical_keycode == KEY_F and _construction_mode_active():
+				and key_event.physical_keycode == KEY_F and _construction_mode_active() \
+				and not CombatManager.any_active(get_tree()):
 			enter()
 			get_viewport().set_input_as_handled()
 

@@ -171,7 +171,7 @@ func _test_session_setup() -> void:
 	s4.start()
 	_expect(s4.current_combatant() == first, "first registered must move first")
 	_expect(s4.state == CombatSession.State.ACTIVE, "state must be ACTIVE")
-	_expect(s4.round == 1, "round must start at 1")
+	_expect(s4.round_number == 1, "round must start at 1")
 	# Adding after start is rejected.
 	_expect(not s4.add_combatant(_mk(&"late", &"foes", Vector2i(5, 5))),
 		"add after start must fail")
@@ -190,7 +190,7 @@ func _test_turn_progression() -> void:
 	_expect(s.is_turn(&"b") and not s.is_turn(&"a"), "is_turn wrong")
 	_expect(s.end_turn(), "second end_turn failed")
 	_expect(s.current_combatant() == a, "order did not wrap to a")
-	_expect(s.round == 2, "round did not increment on wrap, got %d" % s.round)
+	_expect(s.round_number == 2, "round did not increment on wrap, got %d" % s.round_number)
 	_expect(not a.act_used and not a.move_used, "new turn must reset flags")
 
 func _test_defeat_and_victory() -> void:
@@ -218,10 +218,10 @@ func _test_defeat_and_victory() -> void:
 	_expect(s.current_combatant() == b, "expected b after a")
 	s.end_turn()
 	_expect(s.current_combatant() == d, "dead c must be skipped")
-	_expect(s.round == 1, "round should still be 1, got %d" % s.round)
+	_expect(s.round_number == 1, "round should still be 1, got %d" % s.round_number)
 	s.end_turn()
 	_expect(s.current_combatant() == a, "order should wrap to a")
-	_expect(s.round == 2, "round should be 2 after wrap")
+	_expect(s.round_number == 2, "round should be 2 after wrap")
 	# Full victory: fresh duel, b has 2 hp.
 	var parts := _duel()
 	var s2: CombatSession = parts[0]
@@ -460,7 +460,7 @@ func _test_integration_sequences() -> void:
 	var batk := r.attack(&"b", &"a")
 	_expect(batk["ok"], "b attack failed: %s" % str(batk))
 	_expect(s.end_turn(), "b end turn failed")
-	_expect(s.current_combatant() == a and s.round == 2,
+	_expect(s.current_combatant() == a and s.round_number == 2,
 		"a should start round 2")
 	_expect(not a.act_used and not a.move_used, "turn flags must reset")
 	# Attack-then-move on a's fresh turn: attack b, then step to (3,5).

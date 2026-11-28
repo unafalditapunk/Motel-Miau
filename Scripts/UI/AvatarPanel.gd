@@ -66,7 +66,8 @@ func _unhandled_input(event: InputEvent) -> void:
 ## (construction_mode), Creation Mode, FloorPanel, or a transition.
 func _can_open() -> bool:
 	if FloorEditor.any_active(get_tree()) or FloorPanel.any_open(get_tree()) \
-			or TransitionOverlay.any_active(get_tree()):
+			or TransitionOverlay.any_active(get_tree()) \
+			or CombatManager.any_active(get_tree()):
 		return false
 	if _controller == null:
 		_controller = get_tree().get_first_node_in_group(&"block_placement_controller") as BlockPlacementController

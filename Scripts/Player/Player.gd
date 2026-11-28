@@ -63,6 +63,16 @@ var _move_elev_from := 0.0
 var _move_elev_to := 0.0
 var _buffered_direction := Vector2i.ZERO
 var _held_moves: Dictionary = {}
+## Combat path movement (CombatManager-driven): queued room-local
+## steps {cell, elev} played through the normal _play_move pipeline
+## at combat_move_duration — roughly half the exploration step time.
+## combat_move_active stays true until the last step lands so combat
+## input can lock meanwhile; exploration input is already locked by
+## CombatManager.any_active during encounters.
+var combat_move_duration := 0.12
+var combat_move_active := false
+var _combat_steps: Array = []
+var _active_move_duration := 0.0
 
 ## True for network-driven avatars: remote-player replicas on clients
 ## and the server's authoritative bodies. They never join the "player"
@@ -219,6 +229,9 @@ func _cancel_movement() -> void:
 	_move_elapsed = 0.0
 	_move_direction = Vector2i.ZERO
 	_buffered_direction = Vector2i.ZERO
+	_combat_steps.clear()
+	combat_move_active = false
+	_active_move_duration = 0.0
 
 ## True while a modal world UI (FloorPanel), Creation Mode, or an
 ## external input lock (multiplayer pre-sync) is active; movement
@@ -227,7 +240,7 @@ func _cancel_movement() -> void:
 func _world_ui_blocked() -> bool:
 	return local_input_locked \
 		or FloorPanel.any_open(get_tree()) or FloorEditor.any_active(get_tree()) \
-		or AvatarPanel.any_open(get_tree())
+		or AvatarPanel.any_open(get_tree()) or CombatManager.any_active(get_tree())
 
 func request_move(direction: Vector2i) -> void:
 	if direction == Vector2i.ZERO or _world_ui_blocked():
@@ -562,6 +575,7 @@ func _play_move(from_screen: Vector2, to_screen: Vector2, from_elevation: float,
 	_chain_pending = false
 	if move_duration <= 0.0 or grid == null:
 		position = to_screen
+		_move_to = to_screen
 		_update_depth()
 		_is_moving = false
 		return true
@@ -582,7 +596,8 @@ func _process(delta: float) -> void:
 	if not _is_moving:
 		return
 	_move_elapsed += delta
-	var t := clampf(_move_elapsed / move_duration, 0.0, 1.0)
+	var duration := _active_move_duration if _active_move_duration > 0.0 else move_duration
+	var t := clampf(_move_elapsed / duration, 0.0, 1.0)
 	# Chained held-key steps run linear (constant cell speed); isolated
 	# steps keep the smoothstep ease so taps accelerate/decelerate.
 	var eased := t if _move_linear else t * t * (3.0 - 2.0 * t)
@@ -598,6 +613,15 @@ func _finish_move() -> void:
 	_is_moving = false
 	room_transition_active = false
 	_update_facing_animation()
+	# Combat path: pop the next queued step instead of buffered input.
+	# grid_position/elevation were already committed per step, so the
+	# logical cell always matches the cell being walked into.
+	if not _combat_steps.is_empty():
+		_start_combat_step()
+		return
+	if combat_move_active:
+		combat_move_active = false
+		_active_move_duration = 0.0
 	if not buffer_movement_input or _buffered_direction == Vector2i.ZERO:
 		_buffered_direction = Vector2i.ZERO
 		return
@@ -629,6 +653,46 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		_held_moves[key_event.physical_keycode] = Time.get_ticks_msec()
 	else:
 		_held_moves.erase(key_event.physical_keycode)
+
+## Queues a validated combat path for animated walking. steps is an
+## Array of {cell: Vector2i (room-local), elev: float} EXCLUDING the
+## current cell, in order. Each step commits grid_position/elevation
+## immediately (logical) while _play_move tweens the sprite — the
+## same convention exploration movement uses. combat_move_active
+## covers the whole path, not just the in-flight step.
+func start_combat_path(steps: Array) -> void:
+	if steps.is_empty():
+		return
+	if _is_moving:
+		_cancel_movement()
+	_combat_steps.clear()
+	for step in steps:
+		_combat_steps.append(step)
+	combat_move_active = true
+	_start_combat_step()
+
+func _start_combat_step() -> void:
+	if _combat_steps.is_empty():
+		return
+	var step: Dictionary = _combat_steps.pop_front()
+	var cell: Vector2i = step.get("cell", grid_position)
+	var direction := cell - grid_position
+	if _is_cardinal_direction(direction):
+		_set_facing(direction)
+	var from_screen := position
+	var from_elevation := elevation
+	grid_position = cell
+	elevation = float(step.get("elev", elevation))
+	# Linear (constant-speed) steps, same as held-key chains, so a
+	# multi-cell path doesn't pulse per cell.
+	_chain_pending = true
+	_active_move_duration = maxf(combat_move_duration, 0.01)
+	_play_move(from_screen, _screen_position_for_cell(cell, elevation),
+		from_elevation, elevation)
+	# _play_move can snap instantly (zero duration / no grid): drain
+	# the step immediately or combat_move_active would stick.
+	if not _is_moving:
+		_finish_move()
 
 func _update_held_movement() -> void:
 	if network_remote or _held_moves.is_empty() or _world_ui_blocked():

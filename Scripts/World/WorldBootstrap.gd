@@ -48,6 +48,7 @@ var _floor_panel: FloorPanel
 var _avatar_panel: AvatarPanel
 var _floor_editor: FloorEditor
 var _net_manager: MultiplayerManager
+var combat_manager: CombatManager
 ## Launch args parsed once in _ready; empty dict = single-player.
 var _net_args := {}
 var _quarantine_armed_msec := -1
@@ -120,6 +121,7 @@ func _ready() -> void:
 	_build_floor_editor()
 	_build_transition_overlay()
 	_wire_placement_controller()
+	_build_combat_manager()
 	_setup_multiplayer()
 
 func _exit_tree() -> void:
@@ -257,6 +259,18 @@ func _build_floor_editor() -> void:
 	_floor_editor = FloorEditor.new()
 	_floor_editor.name = "FloorEditor"
 	room_world.add_child(_floor_editor)
+
+## Combat prototype: the manager exists on every peer but only
+## single-player boots (no --server/--client args) get the prototype
+## enemy in the entry room. Multiplayer peers stay inert — no spawn,
+## and CombatManager refuses encounters while a net mode is active.
+func _build_combat_manager() -> void:
+	combat_manager = CombatManager.new()
+	combat_manager.name = "CombatManager"
+	add_child(combat_manager)
+	combat_manager.bind_player(player)
+	if _net_args.is_empty():
+		combat_manager.spawn_prototype_enemy()
 
 ## Multiplayer prototype: only instantiated when launch args ask for
 ## it (--server / --client). No args = pure single-player, zero cost.

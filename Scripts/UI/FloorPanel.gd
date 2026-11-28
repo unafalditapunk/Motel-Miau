@@ -56,8 +56,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	if not key_event.pressed or key_event.echo or key_event.keycode != TOGGLE_KEY:
 		return
 	# Floor switching mid-edit would invalidate the editor's room refs;
-	# Creation Mode owns the keyboard until it exits.
-	if FloorEditor.any_active(get_tree()):
+	# Creation Mode owns the keyboard until it exits. An active combat
+	# encounter locks floor changes too.
+	if FloorEditor.any_active(get_tree()) or CombatManager.any_active(get_tree()):
 		return
 	toggle()
 	get_viewport().set_input_as_handled()

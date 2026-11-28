@@ -91,6 +91,7 @@ func _run_checks() -> void:
 	_test_line_of_sight()
 	_test_area_helpers()
 	_test_world_coordinates()
+	_test_path_reconstruction()
 
 func _test_reachable_cardinal() -> void:
 	var start := _w(Vector2i(2, 2))
@@ -205,6 +206,49 @@ func _test_world_coordinates() -> void:
 	_expect(saw_world and not saw_local, "reachable cells must be world cells")
 	_expect(cells.has(_w(Vector2i(3, 2))), "missing expected world cell (103,102)")
 	_expect(not cells.has(Vector2i(3, 2)), "local cell leaked into results")
+
+func _test_path_reconstruction() -> void:
+	var start := _w(Vector2i(2, 2))
+	var dest := _w(Vector2i(4, 2))
+	# Straight shot: path includes both endpoints, all steps cardinal.
+	var path := _cg.get_path(start, 0.0, dest, 10, ACTOR_HEIGHT, MAX_STEP)
+	_expect(path.size() >= 2, "path should include origin and dest")
+	_expect(path[0] == start and path[path.size() - 1] == dest,
+		"path endpoints wrong: %s -> %s" % [path[0], path[path.size() - 1]])
+	var cardinal := true
+	for i in range(1, path.size()):
+		var step := path[i] - path[i - 1]
+		if absi(step.x) + absi(step.y) != 1:
+			cardinal = false
+	_expect(cardinal, "path contains a non-cardinal step")
+	# Path length equals the BFS cost of the destination.
+	var costs := _cg.get_reachable_cells(start, 0.0, 10, ACTOR_HEIGHT, MAX_STEP)
+	_expect(path.size() - 1 == int(costs[dest]),
+		"path length %d != reachable cost %d" % [path.size() - 1, int(costs[dest])])
+	# Deterministic: identical inputs give identical paths.
+	_expect(_cg.get_path(start, 0.0, dest, 10, ACTOR_HEIGHT, MAX_STEP) == path,
+		"get_path is not deterministic")
+	# Unreachable destinations return an empty path.
+	_expect(_cg.get_path(start, 0.0, _w(Vector2i(4, 4)), 10, ACTOR_HEIGHT, MAX_STEP).is_empty(),
+		"chair cell should have no path")
+	_expect(_cg.get_path(start, 0.0, _w(Vector2i(7, 2)), 2, ACTOR_HEIGHT, MAX_STEP).is_empty(),
+		"over-budget destination should have no path")
+	# extra_blocked reroutes around the blocked cell.
+	var detour := _w(Vector2i(3, 2))
+	var blocked_path := _cg.get_path(start, 0.0, dest, 10, ACTOR_HEIGHT, MAX_STEP,
+		[detour])
+	_expect(not blocked_path.is_empty() and blocked_path[blocked_path.size() - 1] == dest,
+		"blocked path should still reach dest")
+	_expect(not blocked_path.has(detour), "path must avoid extra_blocked cell")
+	# Elevation: (8,4) is a 1-high block top — a 1-step climb is legal.
+	var climb := _cg.get_path(_w(Vector2i(7, 4)), 0.0, _w(Vector2i(8, 4)),
+		4, ACTOR_HEIGHT, MAX_STEP)
+	_expect(climb.size() == 2 and climb[1] == _w(Vector2i(8, 4)),
+		"1-step climb path wrong: %s" % str(climb))
+	# ...but the 2-high stack at (6,4) is not.
+	_expect(_cg.get_path(_w(Vector2i(5, 4)), 0.0, _w(Vector2i(6, 4)),
+		4, ACTOR_HEIGHT, MAX_STEP).is_empty(),
+		"2-step climb should have no path")
 
 func _report() -> void:
 	if _failures.is_empty():

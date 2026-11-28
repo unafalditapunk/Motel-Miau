@@ -51,6 +51,7 @@ TESTS=(
     AvatarPanelSmokeTest
     CombatGridSmokeTest
     CombatSessionSmokeTest
+    CombatEncounterSmokeTest
 )
 
 if [ -n "$FILTER" ]; then

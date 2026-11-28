@@ -99,9 +99,23 @@ func can_stand(world_cell: Vector2i, actor_height: float) -> bool:
 func get_reachable_cells(from_cell: Vector2i, from_elevation: float,
 		move_budget: int, actor_height: float, max_step_height: float,
 		extra_blocked: Array[Vector2i] = []) -> Dictionary:
+	var costs: Dictionary = _search(from_cell, from_elevation, move_budget,
+		actor_height, max_step_height, extra_blocked)["costs"]
+	costs.erase(from_cell)
+	return costs
+
+## Cardinal BFS shared by get_reachable_cells and get_path. Returns
+## {"costs": {world_cell: cost incl. start=0}, "parents": {world_cell:
+## predecessor}}. Neighbor order is CARDINAL_DIRECTIONS, so the first
+## discovery of a cell is deterministic — equal-cost paths always
+## resolve to the same parent chain.
+func _search(from_cell: Vector2i, from_elevation: float,
+		move_budget: int, actor_height: float, max_step_height: float,
+		extra_blocked: Array[Vector2i]) -> Dictionary:
 	var costs := {}
+	var parents := {}
 	if not is_ready() or move_budget <= 0 or not _has_cell(from_cell):
-		return costs
+		return {"costs": costs, "parents": parents}
 	var blocked := {}
 	for cell in extra_blocked:
 		blocked[cell] = true
@@ -126,9 +140,32 @@ func get_reachable_cells(from_cell: Vector2i, from_elevation: float,
 			if absf(next_elevation - cell_elevation) > max_step_height + EPSILON:
 				continue
 			costs[next] = cost + 1
+			parents[next] = cell
 			queue.append(next)
-	costs.erase(from_cell)
-	return costs
+	return {"costs": costs, "parents": parents}
+
+## Ordered world-cell path from from_cell to dest, INCLUDING both
+## endpoints ([origin, ..., dest]). Returns an empty Array when dest
+## is unreachable under the same rules as get_reachable_cells
+## (budget, step height, standability, extra_blocked). The path is a
+## shortest-cost route; ties resolve deterministically via BFS
+## discovery order. Callers wanting steps only skip index 0.
+func get_path(from_cell: Vector2i, from_elevation: float, dest: Vector2i,
+		move_budget: int, actor_height: float, max_step_height: float,
+		extra_blocked: Array[Vector2i] = []) -> Array[Vector2i]:
+	var search := _search(from_cell, from_elevation, move_budget,
+		actor_height, max_step_height, extra_blocked)
+	var costs: Dictionary = search["costs"]
+	var path: Array[Vector2i] = []
+	if not costs.has(dest):
+		return path
+	var current := dest
+	while true:
+		path.push_front(current)
+		if current == from_cell:
+			break
+		current = search["parents"][current]
+	return path
 
 # ------------------------------------------------------------------
 # Distance

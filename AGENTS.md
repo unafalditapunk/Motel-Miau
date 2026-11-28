@@ -32,10 +32,69 @@ StructuralGuardSmokeTest, FloorTransitionSmokeTest,
 StructuralOpsSmokeTest, FloorOpsSmokeTest, ServerPersistenceSmokeTest,
 SpawnPointSmokeTest, PortalSmokeTest, PortalTransitionSmokeTest,
 PortalLifecycleSmokeTest, TransitionOverlaySmokeTest,
-AvatarPanelSmokeTest.
+AvatarPanelSmokeTest, CombatGridSmokeTest,
+CombatSessionSmokeTest, CombatEncounterSmokeTest.
 Each prints `<NAME>_SMOKE: OK`. Tests that touch the filesystem redirect
 `RoomSaveSystem.save_dir`/`FloorSaveSystem.save_root` to a
 `user://smoke_*` scratch dir so they never write to the real saves.
+
+## Combat (prototype, single-player only)
+
+Turn-based combat lives in `Scripts/Combat/`:
+
+- `CombatGrid` (RefCounted): read-only tactical queries over the
+  existing BlockLayer — cardinal BFS reachability, `get_path`
+  (ordered world-cell route incl. both endpoints, deterministic
+  tie-break via BFS discovery order; shares `_search` with
+  get_reachable_cells so rules can't diverge), Chebyshev distance,
+  logical grid LOS, radius/line/cross AoE. All cells are WORLD cells
+  (`room.cell_origin + local`); elevation = cell surface.
+- `Combatant`/`CombatSession`/`CombatActionResolver` (RefCounted):
+  pure simulation — registration-order turns, session-level occupancy
+  separate from BlockLayer, Model A economy (one move + one Act per
+  turn), stable StringName reason codes. No nodes, no UI.
+- `CombatManager` (Node2D, group `combat_managers`, child of
+  WorldBootstrap): the only integration point. Spawns one prototype
+  `CombatEnemy` in the entry room on single-player boots only
+  (`_net_args.is_empty()`); net peers never spawn and
+  `try_interact` refuses while a MultiplayerManager mode is active.
+  E within Chebyshev range 2 starts the encounter; `CombatManager.
+  any_active(tree)` is the input lock checked by Player movement,
+  BlockPlacementController, FloorPanel, AvatarPanel, and FloorEditor.
+- `CombatUI` (CanvasLayer): bottom panel (round/turn/HP, Move /
+  Attack / End Turn), click-to-target via `handle_world_click`,
+  "E — Enfrentar" prompt. `CombatHighlights` (Node2D, world space,
+  z_index 4096) draws reachable/target cell tints.
+- `CombatEnemy` art: `Assets/Enemies/<name>/` packs mirror the
+  player-character layout — `rotations/<dir>.png` idles plus
+  `animations/{Walking,Attacking,Attacked,Death}/<dir>/frame_*.png`
+  clips (only south-west/north-west dirs needed; east is mirrored
+  from west at load, same as Player). `ENEMY_ROOT` in CombatEnemy.gd
+  points at the active pack (`baby blue slime`); `FALLBACK_ROOT`
+  (grey-bull avatar + red tint) covers missing art. Attack/hit/death
+  clips are triggered by CombatManager's attack_resolved hook and
+  queue behind any in-flight walk slide; death_pending defers
+  teardown's queue_free until the clip finishes.
+- Enemy turn: `enemy_take_turn()` — attack if range-1 + LOS, else
+  greedy step minimizing Chebyshev distance to the player through the
+  same resolver, attack again if in range, end turn. Deterministic;
+  `enemy_turn_delay` paces it in game.
+- Player↔combatant sync: `resolver.move` commits logic first, then
+  `combatant_moved` drives visuals — the player WALKS the validated
+  path via `Player.start_combat_path` (per-step `_play_move` at
+  `combat_move_duration` = 0.12s, linear chained easing, real walk
+  anims + facing per cardinal step, elevation lerp + depth per frame);
+  the enemy slides via `CombatEnemy.animate_to_path` (Tween, same
+  cells). `CombatManager.player_visual_busy()` locks move/attack/
+  end-turn/clicks until the path drains; teardown snaps the player
+  to the combatant's committed cell. `place_at` remains the fallback
+  for pathless moves. Player HP
+  exists only on the Combatant — there is no death/respawn; defeat
+  just ends the encounter ("prototype mercy").
+- Floor switches force-end any active encounter and despawn the
+  enemy; the enemy is NOT saved or respawned (per-floor boot only).
+- Tests: `CombatGridSmokeTest`, `CombatSessionSmokeTest`,
+  `CombatEncounterSmokeTest` (real Player + manager fixture).
 
 ## Multiplayer quick start
 

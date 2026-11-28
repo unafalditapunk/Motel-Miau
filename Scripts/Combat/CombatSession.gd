@@ -29,7 +29,7 @@ var combat_grid: CombatGrid
 var state: State = State.SETUP
 var end_reason: EndReason = EndReason.NONE
 var winning_team: StringName = &""
-var round := 0
+var round_number := 0
 var turn_index := -1
 var turn_order: Array[Combatant] = []
 var combatants: Array[Combatant] = []
@@ -99,7 +99,7 @@ func start() -> bool:
 		return false
 	turn_order = combatants.duplicate()
 	state = State.ACTIVE
-	round = 1
+	round_number = 1
 	turn_index = -1
 	encounter_started.emit()
 	_advance_turn()
@@ -148,7 +148,7 @@ func _advance_turn() -> void:
 		turn_index += 1
 		if turn_index >= turn_order.size():
 			turn_index = 0
-			round += 1
+			round_number += 1
 			wrapped = true
 		var candidate := turn_order[turn_index]
 		if candidate.is_alive():
@@ -157,11 +157,11 @@ func _advance_turn() -> void:
 		if skips >= turn_order.size():
 			break
 	if wrapped:
-		round_changed.emit(round)
+		round_changed.emit(round_number)
 	var current := current_combatant()
 	if current != null:
 		current.reset_turn()
-	turn_changed.emit(current, round)
+	turn_changed.emit(current, round_number)
 
 # ------------------------------------------------------------------
 # Combat resolution hooks (called by CombatActionResolver)
