@@ -49,6 +49,8 @@ TESTS=(
     PortalLifecycleSmokeTest
     TransitionOverlaySmokeTest
     AvatarPanelSmokeTest
+    CombatGridSmokeTest
+    CombatSessionSmokeTest
 )
 
 if [ -n "$FILTER" ]; then
