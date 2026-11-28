@@ -9,6 +9,7 @@ extends Node2D
 const DEBUG_HUD_SCRIPT := preload("res://Scripts/Debug/DebugHud.gd")
 const FLOOR_PANEL_SCRIPT := preload("res://Scripts/UI/FloorPanel.gd")
 const AVATAR_PANEL_SCRIPT := preload("res://Scripts/UI/AvatarPanel.gd")
+const DISCIPLINE_PANEL_SCRIPT := preload("res://Scripts/UI/DisciplinePanel.gd")
 const TRANSITION_OVERLAY_SCRIPT := preload("res://Scripts/UI/TransitionOverlay.gd")
 const SAVE_KEY := KEY_F5
 const LOAD_KEY := KEY_F6
@@ -46,6 +47,8 @@ var carpet_layer: CarpetLayer
 var _debug_hud: DebugHud
 var _floor_panel: FloorPanel
 var _avatar_panel: AvatarPanel
+var _discipline_panel: DisciplinePanel
+var _character_progression: CharacterProgression
 var _floor_editor: FloorEditor
 var _net_manager: MultiplayerManager
 var combat_manager: CombatManager
@@ -118,6 +121,7 @@ func _ready() -> void:
 	_build_debug_hud()
 	_build_floor_panel()
 	_build_avatar_panel()
+	_build_discipline_panel()
 	_build_floor_editor()
 	_build_transition_overlay()
 	_wire_placement_controller()
@@ -229,6 +233,19 @@ func _build_avatar_panel() -> void:
 	_avatar_panel.name = "AvatarPanel"
 	add_child(_avatar_panel)
 
+## Persistent character progression (Mutant Cursed level, main
+## discipline, equipped abilities). Created before the combat manager
+## so start_encounter can seed the player's per-encounter skillset.
+## Loads its own "progression" block from player_state.json and
+## mirrors writes across every floor save dir.
+func _build_discipline_panel() -> void:
+	_character_progression = CharacterProgression.new()
+	_character_progression.name = "CharacterProgression"
+	add_child(_character_progression)
+	_discipline_panel = DISCIPLINE_PANEL_SCRIPT.new()
+	_discipline_panel.name = "DisciplinePanel"
+	add_child(_discipline_panel)
+
 ## Equips the persisted avatar selection
 ## (user://avatar_selection.json) on the local player. Missing or
 ## no-longer-valid ids keep the scene default — the catalog only
@@ -269,6 +286,7 @@ func _build_combat_manager() -> void:
 	combat_manager.name = "CombatManager"
 	add_child(combat_manager)
 	combat_manager.bind_player(player)
+	combat_manager.character_progression = _character_progression
 	if _net_args.is_empty():
 		combat_manager.spawn_prototype_enemy()
 

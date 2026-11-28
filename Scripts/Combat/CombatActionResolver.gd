@@ -82,12 +82,104 @@ func attack(actor_id: StringName, target_id: StringName) -> Dictionary:
 	if not grid.has_line_of_sight(actor.cell, actor.elevation, actor.height,
 			target.cell, target.elevation, target.height):
 		return _fail(&"no_los", &"attack", actor_id, target_id)
-	var damage := target.apply_damage(ATTACK_DAMAGE)
+	# A pending Drowsiness bonus is consumed by the executed attack.
+	var bonus := actor.skillset.consume_attack_bonus() \
+		if actor.skillset != null else 0
+	var damage := target.apply_damage(ATTACK_DAMAGE + bonus)
 	actor.act_used = true
 	_session.on_attack_resolved(actor, target, damage)
 	return _ok(&"attack", actor_id, target_id, {
 		"damage": damage, "target_hp": target.hp,
-		"target_defeated": not target.is_alive()})
+		"target_defeated": not target.is_alive(),
+		"bonus_damage": bonus})
+
+# ------------------------------------------------------------------
+# Discipline abilities
+# ------------------------------------------------------------------
+
+## Uses an equipped ability from the actor's CombatSkillset. All
+## validation lives here; the UI only picks an ability and a target.
+## Range is MAX Chebyshev distance (unlike attack's exact adjacency).
+## Damage abilities consume a pending Drowsiness bonus; self_damage
+## is applied AFTER the target hit but BEFORE defeat checks, so a
+## double-KO resolves coherently (both dead -> draw, not order-dependent).
+func use_ability(actor_id: StringName, target_id: StringName,
+		ability_id: StringName) -> Dictionary:
+	var actor := _combatant(actor_id)
+	if actor == null:
+		return _fail(&"unknown_combatant", &"ability", actor_id)
+	var gate := _turn_gate(actor, &"ability")
+	if not gate.is_empty():
+		return gate
+	var skillset := actor.skillset
+	if skillset == null or not skillset.has(ability_id):
+		return _fail(&"ability_unavailable", &"ability", actor_id, target_id)
+	var def := AbilityCatalog.ability(ability_id)
+	if def.is_empty():
+		return _fail(&"unknown_ability", &"ability", actor_id, target_id)
+	if StringName(def.get("kind", &"")) == &"passive":
+		return _fail(&"ability_unavailable", &"ability", actor_id, target_id)
+	if actor.act_used:
+		return _fail(&"act_used", &"ability", actor_id, target_id)
+	if not skillset.is_unlimited(ability_id) \
+			and skillset.uses_remaining(ability_id) <= 0:
+		return _fail(&"no_uses", &"ability", actor_id, target_id)
+	if ability_id == &"drowsiness" and skillset.drowsiness_bonus > 0:
+		return _fail(&"effect_pending", &"ability", actor_id, target_id)
+
+	var target: Combatant = null
+	var ability_range := int(def.get("range", 0))
+	if ability_range > 0:
+		target = _session.get_combatant(target_id)
+		if target == null:
+			return _fail(&"unknown_target", &"ability", actor_id, target_id)
+		if not target.is_alive():
+			return _fail(&"target_defeated", &"ability", actor_id, target_id)
+		if target.team == actor.team:
+			return _fail(&"same_team", &"ability", actor_id, target_id)
+		var dist := CombatGrid.get_distance(actor.cell, target.cell)
+		if dist < 1 or dist > ability_range:
+			return _fail(&"out_of_range", &"ability", actor_id, target_id)
+		if bool(def.get("needs_los", false)):
+			var grid := _session.combat_grid
+			if not grid.has_line_of_sight(actor.cell, actor.elevation, actor.height,
+					target.cell, target.elevation, target.height):
+				return _fail(&"no_los", &"ability", actor_id, target_id)
+
+	# Execute: target damage first, self damage second, defeat checks
+	# last — see method doc for why the order matters.
+	var bonus := 0
+	var damage := 0
+	var target_hp := -1
+	var target_defeated := false
+	if target != null and int(def.get("damage", 0)) > 0:
+		if bool(def.get("is_attack", false)):
+			bonus = skillset.consume_attack_bonus()
+		damage = target.apply_damage(int(def["damage"]) + bonus)
+		target_hp = target.hp
+		target_defeated = not target.is_alive()
+	var self_damage := 0
+	if int(def.get("self_damage", 0)) > 0:
+		self_damage = actor.apply_damage(int(def["self_damage"]))
+	skillset.consume_use(ability_id)
+	actor.act_used = true
+	if target != null and damage > 0:
+		_session.on_attack_resolved(actor, target, damage)
+	# Self-damage can defeat the caster; notify after the target's
+	# defeat check so check_end_conditions sees the final board.
+	if self_damage > 0 and not actor.is_alive():
+		_session.notify_combatant_defeated(actor)
+	var ends_turn := bool(def.get("ends_turn", false))
+	if ability_id == &"drowsiness":
+		skillset.drowsiness_bonus = CombatSkillset.DROWSINESS_BONUS
+	return _ok(&"ability", actor_id, target_id if target != null else &"", {
+		"ability_id": ability_id,
+		"damage": damage, "bonus_damage": bonus,
+		"target_hp": target_hp, "target_defeated": target_defeated,
+		"self_damage": self_damage, "actor_hp": actor.hp,
+		"actor_defeated": not actor.is_alive(),
+		"ends_turn": ends_turn,
+		"drowsiness_bonus": skillset.drowsiness_bonus})
 
 # ------------------------------------------------------------------
 # Internals

@@ -189,16 +189,26 @@ static func save_player_state(room_coordinates: Vector2i, position: Vector2i, el
 		push_error("RoomSaveSystem could not create save dir '%s'." % save_dir)
 		return ERR_CANT_CREATE
 	var path := player_state_path()
+	# Merge over any existing file so non-position sections (e.g. the
+	# discipline "progression" block) survive position saves. Read
+	# BEFORE opening for write — WRITE truncates the file.
+	var data := {}
+	if FileAccess.file_exists(path):
+		var existing := FileAccess.open(path, FileAccess.READ)
+		if existing != null:
+			var parsed: Variant = JSON.parse_string(existing.get_as_text())
+			existing.close()
+			if parsed is Dictionary:
+				data = parsed
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	if file == null:
 		push_error("RoomSaveSystem could not open '%s' for writing: %s" % [path, error_string(FileAccess.get_open_error())])
 		return FileAccess.get_open_error()
-	file.store_string(JSON.stringify({
-		"version": VERSION,
-		"room_coordinates": [room_coordinates.x, room_coordinates.y],
-		"position": [position.x, position.y],
-		"elevation": elevation,
-	}, "\t"))
+	data["version"] = VERSION
+	data["room_coordinates"] = [room_coordinates.x, room_coordinates.y]
+	data["position"] = [position.x, position.y]
+	data["elevation"] = elevation
+	file.store_string(JSON.stringify(data, "\t"))
 	file.close()
 	return OK
 

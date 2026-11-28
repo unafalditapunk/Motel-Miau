@@ -33,7 +33,8 @@ StructuralOpsSmokeTest, FloorOpsSmokeTest, ServerPersistenceSmokeTest,
 SpawnPointSmokeTest, PortalSmokeTest, PortalTransitionSmokeTest,
 PortalLifecycleSmokeTest, TransitionOverlaySmokeTest,
 AvatarPanelSmokeTest, CombatGridSmokeTest,
-CombatSessionSmokeTest, CombatEncounterSmokeTest.
+CombatSessionSmokeTest, CombatEncounterSmokeTest,
+MutantCursedSmokeTest.
 Each prints `<NAME>_SMOKE: OK`. Tests that touch the filesystem redirect
 `RoomSaveSystem.save_dir`/`FloorSaveSystem.save_root` to a
 `user://smoke_*` scratch dir so they never write to the real saves.
@@ -93,8 +94,34 @@ Turn-based combat lives in `Scripts/Combat/`:
   just ends the encounter ("prototype mercy").
 - Floor switches force-end any active encounter and despawn the
   enemy; the enemy is NOT saved or respawned (per-floor boot only).
+- Disciplines (Mutant Cursed): `AbilityCatalog` (static defs +
+  unlock table L1–L5), `CombatSkillset` (per-encounter runtime on
+  each Combatant — equipped∩unlocked actives, passives list,
+  Drowsiness bonus, Hope turn counter, uses_left; null = basic
+  attack only, which is what enemies get), `CharacterProgression`
+  (Node, group `character_progressions` — persistent level/main
+  discipline/equipped, stored as a "progression" block inside
+  player_state.json mirrored across every floor save dir + legacy
+  dir; `RoomSaveSystem.save_player_state` merges rather than
+  clobbers extra keys — read the file BEFORE opening WRITE).
+  `CombatActionResolver.use_ability` is the only validation path;
+  self_damage applies before defeat checks so double-KO = DRAW.
+  `CombatSession._advance_turn` calls `skillset.on_turn_completed`
+  for the departing combatant (Hope: +4 HP every 3 own turns,
+  gated on is_main + alive). `CombatManager` seeds the player
+  skillset at start_encounter and exposes player_use_ability /
+  select_ability_mode / player_ability_ids; CombatUI renders an
+  ability button row + effects label (Somnolencia/Esperanza) and
+  arms per-ability click targeting. `DisciplinePanel` (K key,
+  group `discipline_panels`, blocked during combat so equipment
+  can't change mid-encounter) lists abilities with equip toggles;
+  Player/BlockPlacementController/CombatManager all check
+  `DisciplinePanel.any_open`.
 - Tests: `CombatGridSmokeTest`, `CombatSessionSmokeTest`,
-  `CombatEncounterSmokeTest` (real Player + manager fixture).
+  `CombatEncounterSmokeTest` (real Player + manager fixture),
+  `MutantCursedSmokeTest` (unlocks, all 5 abilities, equipment,
+  persistence — wipes its user://smoke_mutant_cursed scratch dir
+  in _initialize so reruns stay deterministic).
 
 ## Multiplayer quick start
 
@@ -155,10 +182,10 @@ bullets below.
   config exports. Two internal components do the heavy lifting, both
   created lazily per instance (floor-ready, no singletons):
   - `RoomNeighborhood` (RefCounted): spatial-bounds + connection-graph
-    BFS, distance caching (signature-checked against primary room and
-    depth/padding exports; `invalidate()` on room/connection changes).
+	BFS, distance caching (signature-checked against primary room and
+	depth/padding exports; `invalidate()` on room/connection changes).
   - `RoomVisuals` (Node child): de-emphasis materials/tween, neighborhood
-    visibility, slide animations; reads config live from RoomWorld.
+	visibility, slide animations; reads config live from RoomWorld.
 - `RoomWorld` registers rooms by unique `room_coordinates` ID via
   `register_room_at(room, id, global_origin, furniture_placements)` /
   `create_room_at(...)` / `create_room_from_definition(...)`.
@@ -208,21 +235,21 @@ bullets below.
 	`connections.json`, and the generator used to skip existing ids —
 	reshaped rooms kept stale cell lists forever. Now
 	`auto_connect_adjacent_rooms` refreshes saved auto doors' cells in
-    place from current geometry and unregisters links whose rooms no
-    longer share an edge.
+	place from current geometry and unregisters links whose rooms no
+	longer share an edge.
   - If it regresses, check in order: (1) did `_connect_adjacent_pair`
-    re-gain an early break or dedupe that drops pairs? (2) does
+	re-gain an early break or dedupe that drops pairs? (2) does
 	`find_exit`'s auto-connection `in_dest` check use
 	`has_footprint_cell` (cell-exact) rather than bounds? (3) are
 	stale `auto_*` cell lists being skipped instead of refreshed?
 	(4) is the "wall" actually a void cell inside the room's bbox —
-    shaped-room notches are NOT floor, stepping there correctly bumps.
+	shaped-room notches are NOT floor, stepping there correctly bumps.
   - Regression coverage: `RoomConnectionSmokeTest.
-    _test_concave_pair_coverage` (notch room whose cells each border
-    two cells of a U-ish room — every boundary crossing must resolve).
-    For ad-hoc verification on a real save, probe every edge-adjacent
-    cross-room step with `find_room_exit` + `get_room_at_world_cell`
-    like `Player.evaluate_transition` does.
+	_test_concave_pair_coverage` (notch room whose cells each border
+	two cells of a U-ish room — every boundary crossing must resolve).
+	For ad-hoc verification on a real save, probe every edge-adjacent
+	cross-room step with `find_room_exit` + `get_room_at_world_cell`
+	like `Player.evaluate_transition` does.
 - Tile sprites (`TileLayer`): textures ≤ `grid.tile_height` px tall are
   stretched into the 64×32 diamond as before. Taller textures render at
   native scale, anchored by `TileDefinition.sprite_anchor`: 0 (default)
@@ -253,28 +280,28 @@ bullets below.
 	lose `mipmaps/generate=true` or skip reimport? (2) did a sprite
 	script re-hardcode `TEXTURE_FILTER_NEAREST` instead of
 	PARENT_NODE? (3) was a new zoom level added below 1.0 that isn't
-    an exact mip divisor? (4) alpha-bleed halos on transparent sprites
-    at mip levels — cosmetic, fix via premultiplied alpha if reported.
-    (5) STALE `.ctex` — the `.import` flag can read `generate=true`
-    while the compiled texture in `.godot/imported/` was built before
-    mipmaps were enabled (happens when `.import` files are patched by
-    script AFTER `--import` ran). The flag alone proves nothing —
-    verify the runtime state instead: a SceneTree probe that boots
-    `Main.tscn`, calls `camera.set_zoom_level(last)`, and prints
-    `camera.get_viewport().canvas_item_default_texture_filter`
-    (Godot 4.7 enum: NEAREST=0, LINEAR=1, LINEAR_WITH_MIPMAPS=2,
-    NEAREST_WITH_MIPMAPS=3 — note the swapped order vs older docs)
-    plus a sweep of world `Sprite2D`s for non-PARENT_NODE filters.
-    Fix: delete the stale `.ctex`/`.md5` under `.godot/imported/`
+	an exact mip divisor? (4) alpha-bleed halos on transparent sprites
+	at mip levels — cosmetic, fix via premultiplied alpha if reported.
+	(5) STALE `.ctex` — the `.import` flag can read `generate=true`
+	while the compiled texture in `.godot/imported/` was built before
+	mipmaps were enabled (happens when `.import` files are patched by
+	script AFTER `--import` ran). The flag alone proves nothing —
+	verify the runtime state instead: a SceneTree probe that boots
+	`Main.tscn`, calls `camera.set_zoom_level(last)`, and prints
+	`camera.get_viewport().canvas_item_default_texture_filter`
+	(Godot 4.7 enum: NEAREST=0, LINEAR=1, LINEAR_WITH_MIPMAPS=2,
+	NEAREST_WITH_MIPMAPS=3 — note the swapped order vs older docs)
+	plus a sweep of world `Sprite2D`s for non-PARENT_NODE filters.
+	Fix: delete the stale `.ctex`/`.md5` under `.godot/imported/`
 	(or `find Assets -name '*.import'` → extract each `path=` dest
-    and `rm` it), then `godot --headless --path . --import` to
-    rebuild, then RESTART the game — a running instance keeps the
-    old mip-less textures in memory and will keep shimmering even
-    though the files on disk are correct. This exact stale-cache
-    case caused the 2026-11-27 recurrence: all flags/filters were
-    already correct, only the reimport + restart was missing.
+	and `rm` it), then `godot --headless --path . --import` to
+	rebuild, then RESTART the game — a running instance keeps the
+	old mip-less textures in memory and will keep shimmering even
+	though the files on disk are correct. This exact stale-cache
+	case caused the 2026-11-27 recurrence: all flags/filters were
+	already correct, only the reimport + restart was missing.
   - Never "fix" it by removing 0.5× from `zoom_levels` in
-    WorldBootstrap.tscn without asking — the overview zoom is wanted.
+	WorldBootstrap.tscn without asking — the overview zoom is wanted.
 - Avatar system: playable characters live under
   `Assets/Characters/<race>/<variant>/` and are auto-discovered by
   `AvatarCatalog` (`Scripts/World/AvatarCatalog.gd`, static) — adding

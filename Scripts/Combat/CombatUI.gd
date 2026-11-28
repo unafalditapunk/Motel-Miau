@@ -13,6 +13,8 @@ const RESULT_SECONDS := 1.4
 
 var manager: CombatManager
 var target_mode := TargetMode.IDLE
+## Ability armed for ATTACK-mode click targeting; &"" = basic attack.
+var armed_ability: StringName = &""
 
 var _panel: PanelContainer
 var _title: Label
@@ -22,6 +24,8 @@ var _result: Label
 var _move_btn: Button
 var _attack_btn: Button
 var _end_btn: Button
+var _ability_box: HFlowContainer
+var _effects: Label
 var _prompt: Label
 var _result_left := 0.0
 
@@ -43,9 +47,9 @@ func _build() -> void:
 	_panel.anchor_right = 0.5
 	_panel.anchor_top = 1.0
 	_panel.anchor_bottom = 1.0
-	_panel.offset_left = -130.0
-	_panel.offset_right = 130.0
-	_panel.offset_top = -150.0
+	_panel.offset_left = -150.0
+	_panel.offset_right = 150.0
+	_panel.offset_top = -196.0
 	_panel.offset_bottom = -14.0
 	_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
@@ -99,6 +103,17 @@ func _build() -> void:
 		if manager != null:
 			manager.player_end_turn())
 	btns.add_child(_end_btn)
+
+	# Equipped discipline abilities — rebuilt by refresh() from the
+	# player's per-encounter skillset.
+	_ability_box = HFlowContainer.new()
+	_ability_box.add_theme_constant_override("h_separation", 6)
+	_ability_box.add_theme_constant_override("v_separation", 4)
+	box.add_child(_ability_box)
+
+	_effects = Label.new()
+	PixelUi.style_label(_effects, PixelUi.TEXT_DIM, 8, true)
+	box.add_child(_effects)
 
 	_status = Label.new()
 	PixelUi.style_label(_status, PixelUi.TEXT_DIM, 8, true)
@@ -158,7 +173,11 @@ func refresh() -> void:
 		and current != null and current.id == CombatManager.PLAYER_ID
 	_move_btn.disabled = not my_turn or busy or (pc != null and pc.move_used)
 	_attack_btn.disabled = not my_turn or busy or (pc != null and pc.act_used)
+	_attack_btn.text = "Attack" if armed_ability == &"" \
+		else _ability_label(armed_ability)
 	_end_btn.disabled = not my_turn or busy
+	_refresh_ability_buttons(my_turn, busy, pc)
+	_refresh_effects()
 	manager.refresh_highlights()
 
 func set_status(text: String) -> void:
@@ -166,7 +185,67 @@ func set_status(text: String) -> void:
 
 func set_target_mode(mode: TargetMode) -> void:
 	target_mode = mode
+	if mode != TargetMode.ATTACK:
+		armed_ability = &""
 	refresh()
+
+func _ability_label(ability_id: StringName) -> String:
+	return String(AbilityCatalog.ability(ability_id).get("display_name", ability_id))
+
+## Rebuilds the equipped-ability buttons from the player's skillset.
+## Buttons stay clickable whenever it's the player's action window so
+## invalid uses surface a reason in the status line; only hard states
+## (not your turn, mid-walk, act spent, uses exhausted) disable them.
+func _refresh_ability_buttons(my_turn: bool, busy: bool, pc: Combatant) -> void:
+	for child in _ability_box.get_children():
+		child.queue_free()
+	if manager == null:
+		return
+	var skillset := manager.player_skillset()
+	for ability_id in manager.player_ability_ids():
+		var def := AbilityCatalog.ability(ability_id)
+		var button := Button.new()
+		button.text = _ability_label(ability_id)
+		var uses_left := -1
+		if skillset != null and not skillset.is_unlimited(ability_id):
+			uses_left = skillset.uses_remaining(ability_id)
+		if uses_left == 0:
+			button.text += " (0)"
+		button.tooltip_text = String(def.get("description", ""))
+		PixelUi.style_button(button, true)
+		PixelUi.nearest(button)
+		button.disabled = not my_turn or busy \
+			or (pc != null and pc.act_used) or uses_left == 0
+		var aid: StringName = ability_id
+		button.pressed.connect(func() -> void: _on_ability_pressed(aid))
+		_ability_box.add_child(button)
+
+func _on_ability_pressed(ability_id: StringName) -> void:
+	if manager == null:
+		return
+	var def := AbilityCatalog.ability(ability_id)
+	var ability_range := int(def.get("range", 0))
+	if ability_range <= 0 or bool(def.get("ends_turn", false)) \
+			or StringName(def.get("kind", &"")) == &"passive":
+		# Self/no-target abilities resolve immediately.
+		manager.player_use_ability(ability_id)
+	else:
+		manager.select_ability_mode(ability_id)
+
+## Drowsiness bonus + Hope counter — the encounter's visible temp
+## effects. Empty when the player has no skillset.
+func _refresh_effects() -> void:
+	var skillset := manager.player_skillset() if manager != null else null
+	if skillset == null:
+		_effects.text = ""
+		return
+	var parts: Array[String] = []
+	if skillset.drowsiness_bonus > 0:
+		parts.append("Somnolencia: next attack +%d" % skillset.drowsiness_bonus)
+	if skillset.hope_unlocked():
+		var done := skillset.turns_completed % CombatSkillset.HOPE_EVERY_TURNS
+		parts.append("Esperanza: %d/%d" % [done, CombatSkillset.HOPE_EVERY_TURNS])
+	_effects.text = "   ".join(parts)
 
 func format_reason(reason: StringName) -> String:
 	match reason:
@@ -192,6 +271,14 @@ func format_reason(reason: StringName) -> String:
 			return "Cell is occupied."
 		&"moving":
 			return "Moving..."
+		&"ability_unavailable":
+			return "Ability not available."
+		&"unknown_ability":
+			return "Unknown ability."
+		&"no_uses":
+			return "No uses left."
+		&"effect_pending":
+			return "Effect already active."
 		&"invalid_target":
 			return "No valid target."
 		_:

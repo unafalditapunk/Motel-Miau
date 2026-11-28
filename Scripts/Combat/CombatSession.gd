@@ -142,6 +142,9 @@ func end_turn() -> bool:
 	return true
 
 func _advance_turn() -> void:
+	# The combatant whose turn is ending completes it here — passives
+	# like Hope count completed owner turns at this boundary.
+	var departing := current_combatant()
 	var wrapped := false
 	var skips := 0
 	while true:
@@ -161,6 +164,8 @@ func _advance_turn() -> void:
 	var current := current_combatant()
 	if current != null:
 		current.reset_turn()
+	if departing != null and departing.skillset != null:
+		departing.skillset.on_turn_completed(departing)
 	turn_changed.emit(current, round_number)
 
 # ------------------------------------------------------------------

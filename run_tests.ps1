@@ -53,7 +53,8 @@ $Tests = @(
     "AvatarPanelSmokeTest",
     "CombatGridSmokeTest",
     "CombatSessionSmokeTest",
-    "CombatEncounterSmokeTest"
+    "CombatEncounterSmokeTest",
+    "MutantCursedSmokeTest"
 )
 
 if ($Filter -ne "") {

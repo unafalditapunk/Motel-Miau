@@ -22,6 +22,9 @@ var max_hp := 0
 var hp := 0
 var act_used := false
 var move_used := false
+## Per-encounter abilities/effects (CombatSkillset). Null for enemies
+## and fixtures without disciplines — they keep the basic attack.
+var skillset: CombatSkillset
 
 func _init(p_id: StringName = &"", p_name: String = "", p_team: StringName = &"",
 		p_cell: Vector2i = Vector2i.ZERO, p_max_hp: int = 0,
@@ -51,6 +54,15 @@ func apply_damage(amount: int) -> int:
 	var dealt := mini(amount, hp)
 	hp -= dealt
 	return dealt
+
+## Applies healing, clamped to max_hp. Returns the HP actually
+## restored (0 for invalid amounts or a defeated combatant).
+func heal(amount: int) -> int:
+	if amount <= 0 or not is_alive():
+		return 0
+	var restored := mini(amount, max_hp - hp)
+	hp += restored
+	return restored
 
 ## Clears per-turn action flags. Called by CombatSession when this
 ## combatant's turn begins.

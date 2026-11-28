@@ -52,6 +52,7 @@ TESTS=(
     CombatGridSmokeTest
     CombatSessionSmokeTest
     CombatEncounterSmokeTest
+    MutantCursedSmokeTest
 )
 
 if [ -n "$FILTER" ]; then

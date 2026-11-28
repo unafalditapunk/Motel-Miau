@@ -30,6 +30,10 @@ var enemy_turn_delay := 0.45
 
 var player: Player
 var enemy: CombatEnemy
+## Persistent character progression (CharacterProgression node).
+## Null in tests/fixtures — the player then fights with an empty
+## skillset (basic attack only), exactly like pre-discipline builds.
+var character_progression: CharacterProgression
 var session: CombatSession
 var resolver: CombatActionResolver
 var combat_grid: CombatGrid
@@ -179,6 +183,7 @@ func _can_interact() -> bool:
 func _modal_open() -> bool:
 	var tree := get_tree()
 	if FloorPanel.any_open(tree) or AvatarPanel.any_open(tree) \
+			or DisciplinePanel.any_open(tree) \
 			or FloorEditor.any_active(tree) or TransitionOverlay.any_active(tree):
 		return true
 	var controller := tree.get_first_node_in_group(&"block_placement_controller") as BlockPlacementController
@@ -210,6 +215,10 @@ func start_encounter() -> bool:
 	_player_combatant = Combatant.new(PLAYER_ID, "You", PLAYER_TEAM,
 		_player_world_cell(), PLAYER_HP, player.elevation,
 		player.height_units, MOVE_BUDGET, player.max_step_height)
+	# Per-encounter skillset: equipped ∩ unlocked, temp effects die
+	# with the combatant on teardown.
+	_player_combatant.skillset = CombatSkillset.from_progression(
+		character_progression)
 	_enemy_combatant = Combatant.new(ENEMY_ID, enemy.display_name, ENEMY_TEAM,
 		enemy.world_cell, ENEMY_HP, enemy.elevation,
 		enemy.height_units, MOVE_BUDGET, 1.0)
@@ -491,15 +500,26 @@ func handle_world_click(world_cell: Vector2i) -> bool:
 		CombatUI.TargetMode.ATTACK:
 			# The sprite is taller than its cell, so clicks on the
 			# enemy's body land on neighbouring cells — accept anything
-			# adjacent to the target's cell as "selecting" it.
+			# within the armed ability's range of the target's cell.
+			var ability_range := _armed_ability_range()
 			if _enemy_combatant != null \
-					and CombatGrid.get_distance(world_cell, _enemy_combatant.cell) <= 1:
-				player_attack()
+					and CombatGrid.get_distance(world_cell, _enemy_combatant.cell) <= ability_range:
+				if ui.armed_ability != &"":
+					player_use_ability(ui.armed_ability)
+				else:
+					player_attack()
 				ui.set_target_mode(CombatUI.TargetMode.IDLE)
 			else:
 				ui.set_status("Select the %s." % _enemy_combatant.display_name.to_lower())
 			return true
 	return false
+
+## Chebyshev range of the currently armed ability, or 1 for the
+## basic attack (armed_ability == &"").
+func _armed_ability_range() -> int:
+	if ui == null or ui.armed_ability == &"":
+		return 1
+	return int(AbilityCatalog.ability(ui.armed_ability).get("range", 1))
 
 func player_move_to(world_cell: Vector2i) -> Dictionary:
 	var result := {"ok": false, "reason": &"not_active"}
@@ -530,6 +550,54 @@ func player_attack() -> Dictionary:
 		result["reason"] = &"moving"
 	elif resolver != null:
 		result = resolver.attack(PLAYER_ID, ENEMY_ID)
+	if ui != null:
+		if bool(result.get("ok", false)):
+			ui.set_status("")
+		else:
+			ui.set_status(ui.format_reason(result.get("reason", &"invalid")))
+	return result
+
+# ------------------------------------------------------------------
+# Discipline abilities (player-facing)
+# ------------------------------------------------------------------
+
+## The player's per-encounter skillset, or null before/after combat.
+func player_skillset() -> CombatSkillset:
+	return _player_combatant.skillset if _player_combatant != null else null
+
+## Ability ids the player can currently arm: equipped actives and
+## ultimates from the skillset (passives never appear).
+func player_ability_ids() -> Array:
+	var ids: Array = []
+	var skillset := player_skillset()
+	if skillset == null:
+		return ids
+	for ability_id in skillset.available:
+		var def := AbilityCatalog.ability(ability_id)
+		if not def.is_empty() \
+				and StringName(def.get("kind", &"")) != &"passive":
+			ids.append(ability_id)
+	return ids
+
+## Arms an ability for click targeting. Self/no-range abilities are
+## used immediately by the UI instead of arming.
+func select_ability_mode(ability_id: StringName) -> void:
+	if player_turn_active() and ui != null:
+		ui.armed_ability = ability_id
+		ui.set_target_mode(CombatUI.TargetMode.ATTACK)
+
+## Executes an equipped ability against the encounter's enemy (the
+## prototype has exactly one). Self-targeting abilities ignore the
+## target. A successful ends_turn ability (Drowsiness) ends the turn
+## immediately, per design.
+func player_use_ability(ability_id: StringName) -> Dictionary:
+	var result := {"ok": false, "reason": &"not_active"}
+	if player_visual_busy():
+		result["reason"] = &"moving"
+	elif resolver != null and _enemy_combatant != null:
+		result = resolver.use_ability(PLAYER_ID, ENEMY_ID, ability_id)
+		if bool(result.get("ok", false)) and bool(result.get("ends_turn", false)):
+			player_end_turn()
 	if ui != null:
 		if bool(result.get("ok", false)):
 			ui.set_status("")

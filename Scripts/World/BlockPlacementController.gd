@@ -66,6 +66,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	if FloorPanel.any_open(get_tree()) or FloorEditor.any_active(get_tree()) \
 			or TransitionOverlay.any_active(get_tree()) \
 			or AvatarPanel.any_open(get_tree()) \
+			or DisciplinePanel.any_open(get_tree()) \
 			or CombatManager.any_active(get_tree()):
 		return
 	if event is InputEventKey:

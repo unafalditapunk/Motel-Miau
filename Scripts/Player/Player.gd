@@ -240,7 +240,8 @@ func _cancel_movement() -> void:
 func _world_ui_blocked() -> bool:
 	return local_input_locked \
 		or FloorPanel.any_open(get_tree()) or FloorEditor.any_active(get_tree()) \
-		or AvatarPanel.any_open(get_tree()) or CombatManager.any_active(get_tree())
+		or AvatarPanel.any_open(get_tree()) or DisciplinePanel.any_open(get_tree()) \
+		or CombatManager.any_active(get_tree())
 
 func request_move(direction: Vector2i) -> void:
 	if direction == Vector2i.ZERO or _world_ui_blocked():
