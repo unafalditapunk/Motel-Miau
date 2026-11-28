@@ -15,7 +15,9 @@ signal panel_toggled(is_open: bool)
 const TOGGLE_KEY := KEY_K
 const LAYER_INDEX := 66
 const PANEL_WIDTH := 430.0
-const PANEL_HEIGHT := 400.0
+## Must stay under the 360px viewport height — a taller panel clips
+## off-screen top and bottom even though it's anchor-centered.
+const PANEL_HEIGHT := 320.0
 
 var panel_open := false:
 	set(value):
@@ -25,6 +27,7 @@ var panel_open := false:
 		if _root != null:
 			_root.visible = value
 		if value:
+			_fit_to_viewport()
 			_rebuild()
 		panel_toggled.emit(value)
 
@@ -159,6 +162,7 @@ func _make_ability_row(ability_id: StringName, progression: CharacterProgression
 
 	var detail := Label.new()
 	detail.text = _detail_text(def, unlocked)
+	detail.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	PixelUi.style_label(detail, PixelUi.TEXT_DIM, 9, true)
 	detail.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	labels.add_child(detail)
@@ -300,3 +304,19 @@ func _build_ui() -> void:
 	_status_label.text = ""
 	PixelUi.style_label(_status_label, PixelUi.TEXT_DIM, 9)
 	vbox.add_child(_status_label)
+
+	_fit_to_viewport()
+
+## Keeps the panel centered and inside the viewport: content can push
+## the combined minimum size past the fixed offsets (long unwrapped
+## labels did exactly that), so the rect is recomputed from the live
+## viewport on every open.
+func _fit_to_viewport() -> void:
+	var vp := get_viewport().get_visible_rect().size
+	var w := minf(PANEL_WIDTH, maxf(vp.x - 16.0, 200.0))
+	var h := minf(PANEL_HEIGHT, maxf(vp.y - 16.0, 200.0))
+	_root.offset_left = -w * 0.5
+	_root.offset_top = -h * 0.5
+	_root.offset_right = w * 0.5
+	_root.offset_bottom = h * 0.5
+	_root.custom_minimum_size = Vector2(w, h)

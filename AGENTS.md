@@ -62,9 +62,17 @@ Turn-based combat lives in `Scripts/Combat/`:
   E within Chebyshev range 2 starts the encounter; `CombatManager.
   any_active(tree)` is the input lock checked by Player movement,
   BlockPlacementController, FloorPanel, AvatarPanel, and FloorEditor.
-- `CombatUI` (CanvasLayer): bottom panel (round/turn/HP, Move /
-  Attack / End Turn), click-to-target via `handle_world_click`,
-  "E — Enfrentar" prompt. `CombatHighlights` (Node2D, world space,
+- `CombatUI` (CanvasLayer): Minecraft-style ability hotbar
+  bottom-center (one square slot per EQUIPPED ability; number keys
+  1-9 + click select; `AbilitySlotButton` inner class builds a
+  structured custom tooltip; Esc cancels targeting; the armed slot
+  keeps its highlight until another pick or a successful use) plus
+  a compact info panel bottom-right (round/turn/HP, Move / End
+  Turn, status, Somnolencia/Esperanza effects). The basic Attack
+  button was removed — abilities cover it. Click-to-target via
+  `handle_world_click`; a FAILED ability use keeps the slot armed
+  (only success disarms). "E — Enfrentar" prompt.
+  `CombatHighlights` (Node2D, world space,
   z_index 4096) draws reachable/target cell tints.
 - `CombatEnemy` art: `Assets/Enemies/<name>/` packs mirror the
   player-character layout — `rotations/<dir>.png` idles plus
@@ -121,7 +129,22 @@ Turn-based combat lives in `Scripts/Combat/`:
   `CombatEncounterSmokeTest` (real Player + manager fixture),
   `MutantCursedSmokeTest` (unlocks, all 5 abilities, equipment,
   persistence — wipes its user://smoke_mutant_cursed scratch dir
-  in _initialize so reruns stay deterministic).
+  in _initialize so reruns stay deterministic),
+  `CombatHotbarSmokeTest` (hotbar slots, number keys, targeting,
+  Somnolencia, unavailable reasons, victory teardown — wipes
+  user://smoke_combat_hotbar likewise),
+  `DebugChatSmokeTest` (chat toggle, /setlevel, error paths,
+  persistence — wipes user://smoke_debug_chat likewise).
+- DebugChat (Scripts/UI/DebugChat.gd, group `debug_chats`):
+  Minecraft-style command line — Enter/Return opens a single-line
+  input above the bottom-left corner, Escape or submit closes it.
+  `/setlevel <n>` drives `CharacterProgression.set_level` (persists
+  through the normal player_state.json path); `/help` lists
+  commands; anything else echoes "!Unknown command". Normal Mode
+  only — same guard set as AvatarPanel/DisciplinePanel plus
+  BlockPlacementController.construction_mode. While open it blocks
+  world input via `DebugChat.any_open` (checked by Player,
+  BlockPlacementController, and CombatManager._modal_open).
 
 ## Multiplayer quick start
 

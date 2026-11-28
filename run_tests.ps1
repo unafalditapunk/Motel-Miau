@@ -54,7 +54,9 @@ $Tests = @(
     "CombatGridSmokeTest",
     "CombatSessionSmokeTest",
     "CombatEncounterSmokeTest",
-    "MutantCursedSmokeTest"
+    "MutantCursedSmokeTest",
+    "CombatHotbarSmokeTest",
+    "DebugChatSmokeTest"
 )
 
 if ($Filter -ne "") {

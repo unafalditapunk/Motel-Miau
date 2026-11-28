@@ -183,7 +183,7 @@ func _can_interact() -> bool:
 func _modal_open() -> bool:
 	var tree := get_tree()
 	if FloorPanel.any_open(tree) or AvatarPanel.any_open(tree) \
-			or DisciplinePanel.any_open(tree) \
+			or DisciplinePanel.any_open(tree) or DebugChat.any_open(tree) \
 			or FloorEditor.any_active(tree) or TransitionOverlay.any_active(tree):
 		return true
 	var controller := tree.get_first_node_in_group(&"block_placement_controller") as BlockPlacementController
@@ -504,11 +504,18 @@ func handle_world_click(world_cell: Vector2i) -> bool:
 			var ability_range := _armed_ability_range()
 			if _enemy_combatant != null \
 					and CombatGrid.get_distance(world_cell, _enemy_combatant.cell) <= ability_range:
+				# The pre-check only proves the CLICK landed near the
+				# enemy; the resolver still validates actor->target
+				# range/LOS. A failed use keeps the ability armed so
+				# the player can pick another target — the status
+				# line already carries the reason.
+				var result: Dictionary
 				if ui.armed_ability != &"":
-					player_use_ability(ui.armed_ability)
+					result = player_use_ability(ui.armed_ability)
 				else:
-					player_attack()
-				ui.set_target_mode(CombatUI.TargetMode.IDLE)
+					result = player_attack()
+				if bool(result.get("ok", false)):
+					ui.set_target_mode(CombatUI.TargetMode.IDLE)
 			else:
 				ui.set_status("Select the %s." % _enemy_combatant.display_name.to_lower())
 			return true

@@ -53,6 +53,8 @@ TESTS=(
     CombatSessionSmokeTest
     CombatEncounterSmokeTest
     MutantCursedSmokeTest
+    CombatHotbarSmokeTest
+    DebugChatSmokeTest
 )
 
 if [ -n "$FILTER" ]; then

@@ -10,6 +10,7 @@ const DEBUG_HUD_SCRIPT := preload("res://Scripts/Debug/DebugHud.gd")
 const FLOOR_PANEL_SCRIPT := preload("res://Scripts/UI/FloorPanel.gd")
 const AVATAR_PANEL_SCRIPT := preload("res://Scripts/UI/AvatarPanel.gd")
 const DISCIPLINE_PANEL_SCRIPT := preload("res://Scripts/UI/DisciplinePanel.gd")
+const DEBUG_CHAT_SCRIPT := preload("res://Scripts/UI/DebugChat.gd")
 const TRANSITION_OVERLAY_SCRIPT := preload("res://Scripts/UI/TransitionOverlay.gd")
 const SAVE_KEY := KEY_F5
 const LOAD_KEY := KEY_F6
@@ -122,6 +123,7 @@ func _ready() -> void:
 	_build_floor_panel()
 	_build_avatar_panel()
 	_build_discipline_panel()
+	_build_debug_chat()
 	_build_floor_editor()
 	_build_transition_overlay()
 	_wire_placement_controller()
@@ -245,6 +247,13 @@ func _build_discipline_panel() -> void:
 	_discipline_panel = DISCIPLINE_PANEL_SCRIPT.new()
 	_discipline_panel.name = "DisciplinePanel"
 	add_child(_discipline_panel)
+
+## Minecraft-style chat/command line (Enter). Normal Mode only —
+## /setlevel drives CharacterProgression.
+func _build_debug_chat() -> void:
+	var chat := DEBUG_CHAT_SCRIPT.new()
+	chat.name = "DebugChat"
+	add_child(chat)
 
 ## Equips the persisted avatar selection
 ## (user://avatar_selection.json) on the local player. Missing or

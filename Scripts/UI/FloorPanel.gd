@@ -26,6 +26,7 @@ var panel_open := false:
 		if _root != null:
 			_root.visible = value
 		if value:
+			_fit_to_viewport()
 			_rebuild_list()
 		panel_toggled.emit(value)
 
@@ -469,3 +470,17 @@ func _build_ui() -> void:
 	_status_label.text = ""
 	PixelUi.style_label(_status_label, PixelUi.TEXT_DIM, 9)
 	vbox.add_child(_status_label)
+
+	_fit_to_viewport()
+
+## Keeps the panel centered and inside the viewport — PANEL_HEIGHT
+## alone can exceed the 360px-tall logical screen.
+func _fit_to_viewport() -> void:
+	var vp := get_viewport().get_visible_rect().size
+	var w := minf(PANEL_WIDTH, maxf(vp.x - 16.0, 200.0))
+	var h := minf(PANEL_HEIGHT, maxf(vp.y - 16.0, 200.0))
+	_root.offset_left = -w * 0.5
+	_root.offset_top = -h * 0.5
+	_root.offset_right = w * 0.5
+	_root.offset_bottom = h * 0.5
+	_root.custom_minimum_size = Vector2(w, h)
